@@ -113,7 +113,7 @@ Edit `backend/.env` (this file is gitignored — never commit real secrets):
 | `IBKR_HOST`                  | Host IP for trading IBKR Gateway / TWS                      | `127.0.0.1`                    |
 | `IBKR_PORT`                  | Socket port for trading gateway (`4002` paper, `4001` live) | `4002`                         |
 | `IBKR_CLIENT_ID`             | Unique client ID for trading connection                     | `45`                           |
-| `IBKR_ACCOUNT`               | IBKR Account ID (e.g. `DU123456` or `U1234567`)             | _(optional, auto-detects)_     |
+| `IBKR_ACCOUNT`               | IBKR Real Account ID (e.g. `U1234567`). Only applies to live trading; ignored in `sandbox` | _(optional, auto-detects)_     |
 | `IBKR_DATA_HOST`             | Market data gateway host (if using dual gateway)            | `127.0.0.1`                    |
 | `IBKR_DATA_PORT`             | Market data gateway port (e.g. `4001` live data)            | `4001`                         |
 | `IBKR_DATA_CLIENT_ID`        | Dedicated client ID for market data streaming               | `46`                           |

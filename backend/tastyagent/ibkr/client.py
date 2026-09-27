@@ -49,15 +49,87 @@ class IBKRClient:
     def is_connected(self) -> bool:
         return self._connected and self.trading_ib.isConnected()
 
+    def _resolve_account(self, managed: list[str]) -> None:
+        """Resolve active trading account based on current mode and connected gateway accounts.
+
+        IBKR_ACCOUNT is strictly reserved for real account live trading (LIVE_APPROVAL / LIVE_AUTO).
+        In sandbox mode, IBKR_ACCOUNT is ignored and the connected paper gateway account is used.
+        """
+        if not self.settings.mode.is_live:
+            # Sandbox / non-live mode: strictly use the paper trading gateway account, ignore IBKR_ACCOUNT
+            self._trading_account = managed[0] if managed else ""
+            if self.settings.ibkr_account:
+                logger.info(
+                    "Sandbox mode active: ignoring configured IBKR_ACCOUNT '%s'. "
+                    "Using gateway paper account: '%s'.",
+                    self.settings.ibkr_account,
+                    self._trading_account or "none",
+                )
+            else:
+                logger.info(
+                    "Sandbox mode active: using gateway paper account: '%s'.",
+                    self._trading_account or "none",
+                )
+        else:
+            # Real account live trading: apply IBKR_ACCOUNT
+            if self.settings.ibkr_account:
+                if managed and self.settings.ibkr_account in managed:
+                    self._trading_account = self.settings.ibkr_account
+                    logger.info(
+                        "Live mode active: using configured real IBKR account: %s",
+                        self._trading_account,
+                    )
+                else:
+                    fallback = managed[0] if managed else self.settings.ibkr_account
+                    logger.warning(
+                        "Live mode active: configured IBKR_ACCOUNT '%s' not found in managed accounts %s. "
+                        "Defaulting to '%s'.",
+                        self.settings.ibkr_account,
+                        managed,
+                        fallback,
+                    )
+                    self._trading_account = fallback
+            elif managed:
+                self._trading_account = managed[0]
+                logger.info(
+                    "Live mode active: no IBKR_ACCOUNT specified; using primary account: %s",
+                    self._trading_account,
+                )
+            else:
+                self._trading_account = ""
+
+    def refresh_account(self) -> str:
+        """Refresh and return the active trading account based on current mode."""
+        managed = (
+            self.trading_ib.managedAccounts() if self.trading_ib.isConnected() else []
+        )
+        self._resolve_account(managed)
+        return self._trading_account or ""
+
     @property
     def account(self) -> str:
-        """Active account number used for trading operations."""
+        """Active account number used for trading operations.
+
+        IBKR_ACCOUNT is strictly reserved for real account live trading (LIVE_APPROVAL / LIVE_AUTO).
+        In sandbox mode, IBKR_ACCOUNT is never used; the connected paper gateway account is used instead.
+        """
+        if not self.settings.mode.is_live:
+            if self._trading_account:
+                return self._trading_account
+            accounts = self.trading_ib.managedAccounts()
+            if accounts:
+                return accounts[0]
+            return ""
+
+        # Real account live trading:
         if self._trading_account:
             return self._trading_account
+        if self.settings.ibkr_account:
+            return self.settings.ibkr_account
         accounts = self.trading_ib.managedAccounts()
         if accounts:
             return accounts[0]
-        return self.settings.ibkr_account or ""
+        return ""
 
     async def connect(self, timeout: float = 10.0) -> None:
         """Establish connections to trading and data gateways."""
@@ -80,27 +152,7 @@ class IBKRClient:
         managed = self.trading_ib.managedAccounts()
         logger.info("Trading gateway connected. Managed accounts: %s", managed)
 
-        # Validate specified account if provided
-        if self.settings.ibkr_account:
-            if self.settings.ibkr_account in managed:
-                self._trading_account = self.settings.ibkr_account
-                logger.info("Using configured IBKR account: %s", self._trading_account)
-            else:
-                logger.warning(
-                    "Configured IBKR_ACCOUNT '%s' not found in managed accounts %s. Defaulting to '%s'.",
-                    self.settings.ibkr_account,
-                    managed,
-                    managed[0] if managed else "",
-                )
-                self._trading_account = (
-                    managed[0] if managed else self.settings.ibkr_account
-                )
-        elif managed:
-            self._trading_account = managed[0]
-            logger.info(
-                "No IBKR_ACCOUNT specified; using primary account: %s",
-                self._trading_account,
-            )
+        self._resolve_account(managed)
 
         # Connect data session
         logger.info(

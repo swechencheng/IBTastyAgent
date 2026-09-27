@@ -16,6 +16,7 @@ def mock_client():
     client = IBKRClient(settings)
     client.trading_ib = MagicMock()
     client.data_ib = MagicMock()
+    client.trading_ib.managedAccounts.return_value = ["DU123456"]
     client.trading_ib.qualifyContractsAsync = AsyncMock()
     client.data_ib.qualifyContractsAsync = AsyncMock()
     client.trading_ib.whatIfOrderAsync = AsyncMock(

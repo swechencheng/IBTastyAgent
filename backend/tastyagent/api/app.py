@@ -187,6 +187,9 @@ def create_app(
             rt.mode = TradingMode(req.mode)
         except ValueError:
             raise HTTPException(400, f"invalid mode: {req.mode}")
+        if getattr(app.state, "client", None):
+            app.state.client.settings.mode = rt.mode
+            app.state.client.refresh_account()
         return status(rt)
 
     @app.post("/api/kill-switch", response_model=StatusOut)

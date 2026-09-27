@@ -67,7 +67,11 @@ class Settings(BaseSettings):
     ibkr_host: str = Field(default="127.0.0.1", alias="IBKR_HOST")
     ibkr_port: int = Field(default=4002, alias="IBKR_PORT")
     ibkr_client_id: int = Field(default=55, alias="IBKR_CLIENT_ID")
-    ibkr_account: str = Field(default="", alias="IBKR_ACCOUNT")
+    ibkr_account: str = Field(
+        default="",
+        alias="IBKR_ACCOUNT",
+        description="IBKR account ID for real-account live trading (e.g. U1234567). Ignored in sandbox mode.",
+    )
 
     # IBKR Real-time Market Data Connection (dual-gateway support)
     ibkr_data_host: str = Field(default="127.0.0.1", alias="IBKR_DATA_HOST")
