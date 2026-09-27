@@ -369,7 +369,9 @@ export default function Settings({
           </CardContent>
         </Card>
       )}
-      <p className={cn("mt-3 text-xs text-text-faint")}>Settings are held in memory and reset on server restart.</p>
+      <p className={cn("mt-3 text-xs text-text-faint")}>
+        Settings are synchronized to backend/.env and persisted across restarts.
+      </p>
     </div>
   );
 }

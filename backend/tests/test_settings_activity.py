@@ -109,3 +109,69 @@ def test_trade_events_feed_and_timeline():
     assert all(e["symbol"] == "XLE" for e in feed)
     after = c.get(f"/api/events?after={feed[-2]['id']}").json()
     assert [e["kind"] for e in after] == ["open"]
+
+
+def test_persist_settings_to_env_and_reload(tmp_path):
+    from tastyagent.settings import persist_settings_to_env
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("TASTYAGENT_MODE=sandbox\nTASTYAGENT_WORKING_CAPITAL=10000.0\n")
+
+    persist_settings_to_env(
+        {
+            "mode": "live_approval",
+            "use_custom_working_capital": False,
+            "working_capital": 25000.0,
+            "scheduler_interval_seconds": 120.0,
+            "scheduler_market_hours_only": False,
+            "strategy": {
+                "min_iv_rank": 0.45,
+                "target_short_delta": 0.20,
+                "universe_top_n": 25,
+                "use_hard_stop": True,
+            },
+            "risk": {"max_trade_bp_pct": 0.12, "max_total_bp_pct": 0.50},
+        },
+        env_file=env_file,
+    )
+
+    content = env_file.read_text()
+    assert "TASTYAGENT_MODE=live_approval" in content
+    assert "TASTYAGENT_USE_CUSTOM_WORKING_CAPITAL=false" in content
+    assert "TASTYAGENT_WORKING_CAPITAL=25000.0" in content
+    assert "TASTYAGENT_SCHEDULER_INTERVAL_SECONDS=120.0" in content
+    assert "TASTYAGENT_SCHEDULER_MARKET_HOURS_ONLY=false" in content
+    assert "TASTYAGENT_MIN_IV_RANK=0.45" in content
+    assert "TASTYAGENT_TARGET_SHORT_DELTA=0.2" in content
+    assert "TASTYAGENT_UNIVERSE_TOP_N=25" in content
+    assert "TASTYAGENT_USE_HARD_STOP=true" in content
+    assert "TASTYAGENT_MAX_TRADE_BP_PCT=0.12" in content
+
+
+def test_put_settings_syncs_to_configured_env_file(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("TASTYAGENT_MODE=sandbox\nTASTYAGENT_WORKING_CAPITAL=10000.0\n")
+
+    app = create_app(factory(), Runtime(mode=TradingMode.SANDBOX), env_file=env_file)
+    c = TestClient(app)
+
+    c.put(
+        "/api/settings",
+        json={
+            "use_custom_working_capital": False,
+            "working_capital": 30000.0,
+            "scheduler_interval_seconds": 180.0,
+            "strategy": {"min_iv_rank": 0.35, "target_short_delta": 0.18},
+            "risk": {"max_trade_bp_pct": 0.09},
+        },
+    )
+
+    c.post("/api/mode", json={"mode": "live_approval"})
+
+    content = env_file.read_text()
+    assert "TASTYAGENT_WORKING_CAPITAL=30000.0" in content
+    assert "TASTYAGENT_USE_CUSTOM_WORKING_CAPITAL=false" in content
+    assert "TASTYAGENT_SCHEDULER_INTERVAL_SECONDS=180.0" in content
+    assert "TASTYAGENT_TARGET_SHORT_DELTA=0.18" in content
+    assert "TASTYAGENT_MAX_TRADE_BP_PCT=0.09" in content
+    assert "TASTYAGENT_MODE=live_approval" in content

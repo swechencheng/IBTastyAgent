@@ -11,6 +11,7 @@ from dataclasses import asdict, fields, replace
 from datetime import date, datetime
 import logging
 import os
+from pathlib import Path
 from typing import Iterator
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -76,6 +77,7 @@ def create_app(
     *,
     client=None,
     metrics_session=None,
+    env_file: Path | str | None = None,
 ) -> FastAPI:
     app = FastAPI(title="IBTastyAgent", version="0.1.0")
     app.add_middleware(
@@ -88,8 +90,20 @@ def create_app(
     app.state.runtime = runtime
     app.state.client = client
     app.state.metrics_session = metrics_session
+    app.state.env_file = Path(env_file).resolve() if env_file else None
     app.state.scheduler_task = None
     app.state.scheduler_stop = None
+
+    def _sync_env(updates: dict) -> None:
+        target = getattr(app.state, "env_file", None)
+        if target is None and not os.environ.get("PYTEST_CURRENT_TEST"):
+            from ..settings import find_env_file
+
+            target = find_env_file()
+        if target:
+            from ..settings import persist_settings_to_env
+
+            persist_settings_to_env(updates, env_file=target)
 
     def scheduler_running() -> bool:
         t = app.state.scheduler_task
@@ -190,6 +204,7 @@ def create_app(
         if getattr(app.state, "client", None):
             app.state.client.settings.mode = rt.mode
             app.state.client.refresh_account()
+        _sync_env({"mode": rt.mode.value})
         return status(rt)
 
     @app.post("/api/kill-switch", response_model=StatusOut)
@@ -479,6 +494,7 @@ def create_app(
             rt.risk = _apply_updates(
                 rt.risk, {k: v for k, v in req.risk.items() if k != "kill_switch"}
             )
+        _sync_env(req.model_dump(exclude_unset=True))
         return _settings_out(rt)
 
     # --- activity (recent decision cycles + LLM rationale) ---
@@ -623,8 +639,9 @@ def _default_app() -> FastAPI:
 
     from dotenv import load_dotenv
 
+    env_path = Path(__file__).resolve().parents[2] / ".env"
     # uvicorn doesn't load .env; do it here, overriding any empty harness vars.
-    load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=True)
+    load_dotenv(env_path, override=True)
 
     from ..db.session import init_db, make_engine, session_factory
     from ..ibkr.client import IBKRClient
@@ -638,13 +655,20 @@ def _default_app() -> FastAPI:
         use_custom_working_capital=settings.use_custom_working_capital,
         starting_capital=settings.working_capital,
         strategy=settings.strategy_params(),
+        risk=settings.risk_limits(),
+        scheduler_interval_seconds=settings.scheduler_interval_seconds,
+        scheduler_market_hours_only=settings.scheduler_market_hours_only,
     )
 
     client = IBKRClient(settings)
     metrics_session = client.data_ib
 
     return create_app(
-        session_factory(engine), runtime, client=client, metrics_session=metrics_session
+        session_factory(engine),
+        runtime,
+        client=client,
+        metrics_session=metrics_session,
+        env_file=env_path,
     )
 
 

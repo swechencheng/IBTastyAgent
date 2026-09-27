@@ -7,7 +7,11 @@ imports a third-party package. Import this only from the application wiring
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import fields
+from pathlib import Path
+from typing import Any
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,12 +28,17 @@ class _StrategyEnv(BaseSettings):
     max_dte: int | None = None
     target_dte: int | None = None
     max_short_leg_delta: float | None = None
+    target_short_delta: float | None = None
+    spread_long_delta: float | None = None
     max_bid_ask_width_pct: float | None = None
     min_open_interest: int | None = None
     min_daily_volume: int | None = None
     earnings_blackout_days: int | None = None
+    universe_top_n: int | None = None
     take_profit_pct: float | None = None
     manage_dte: int | None = None
+    tested_delta_threshold: float | None = None
+    use_hard_stop: bool | None = None
     stop_loss_multiple: float | None = None
 
 
@@ -109,11 +118,121 @@ class Settings(BaseSettings):
     )
     working_capital: float = Field(default=10_000.0, alias="TASTYAGENT_WORKING_CAPITAL")
 
+    # Scheduler settings
+    scheduler_interval_seconds: float = Field(
+        default=300.0,
+        alias="TASTYAGENT_SCHEDULER_INTERVAL_SECONDS",
+    )
+    scheduler_market_hours_only: bool = Field(
+        default=True,
+        alias="TASTYAGENT_SCHEDULER_MARKET_HOURS_ONLY",
+    )
+
     def strategy_params(self) -> StrategyParams:
         return _merge(StrategyParams(), _StrategyEnv())
 
     def risk_limits(self) -> RiskLimits:
         return _merge(RiskLimits(), _RiskEnv())
+
+
+def find_env_file() -> Path:
+    """Resolve the active .env file location."""
+    candidate = Path(__file__).resolve().parents[1] / ".env"
+    if candidate.exists():
+        return candidate
+    cwd_candidate = Path(".env").resolve()
+    if cwd_candidate.exists():
+        return cwd_candidate
+    from dotenv import find_dotenv
+
+    found = find_dotenv()
+    if found:
+        return Path(found).resolve()
+    return candidate
+
+
+def persist_settings_to_env(
+    updates: dict[str, Any], env_file: Path | str | None = None
+) -> None:
+    """Synchronize modified dashboard settings back to the .env file."""
+    from dotenv import set_key
+
+    target = Path(env_file).resolve() if env_file else find_env_file()
+    logger = logging.getLogger("tastyagent.settings")
+
+    key_value_pairs: list[tuple[str, str]] = []
+
+    if "mode" in updates and updates["mode"] is not None:
+        key_value_pairs.append(("TASTYAGENT_MODE", str(updates["mode"]).lower()))
+
+    if (
+        "use_custom_working_capital" in updates
+        and updates["use_custom_working_capital"] is not None
+    ):
+        key_value_pairs.append(
+            (
+                "TASTYAGENT_USE_CUSTOM_WORKING_CAPITAL",
+                "true" if updates["use_custom_working_capital"] else "false",
+            )
+        )
+
+    if "working_capital" in updates and updates["working_capital"] is not None:
+        key_value_pairs.append(
+            ("TASTYAGENT_WORKING_CAPITAL", str(updates["working_capital"]))
+        )
+
+    if (
+        "scheduler_interval_seconds" in updates
+        and updates["scheduler_interval_seconds"] is not None
+    ):
+        key_value_pairs.append(
+            (
+                "TASTYAGENT_SCHEDULER_INTERVAL_SECONDS",
+                str(updates["scheduler_interval_seconds"]),
+            )
+        )
+
+    if (
+        "scheduler_market_hours_only" in updates
+        and updates["scheduler_market_hours_only"] is not None
+    ):
+        key_value_pairs.append(
+            (
+                "TASTYAGENT_SCHEDULER_MARKET_HOURS_ONLY",
+                "true" if updates["scheduler_market_hours_only"] else "false",
+            )
+        )
+
+    strategy = updates.get("strategy")
+    if isinstance(strategy, dict):
+        for k, v in strategy.items():
+            if v is not None:
+                env_key = f"TASTYAGENT_{k.upper()}"
+                env_val = "true" if v is True else ("false" if v is False else str(v))
+                key_value_pairs.append((env_key, env_val))
+
+    risk = updates.get("risk")
+    if isinstance(risk, dict):
+        for k, v in risk.items():
+            if k == "kill_switch":
+                continue
+            if v is not None:
+                env_key = f"TASTYAGENT_{k.upper()}"
+                env_val = "true" if v is True else ("false" if v is False else str(v))
+                key_value_pairs.append((env_key, env_val))
+
+    if not key_value_pairs:
+        return
+
+    try:
+        if not target.exists() and target.parent.exists():
+            target.touch()
+        for k, v in key_value_pairs:
+            set_key(str(target), k, v, quote_mode="never")
+            os.environ[k] = v
+        logger.info("Persisted %d settings to %s", len(key_value_pairs), target)
+    except Exception as e:
+        logger.warning("Failed to persist settings to %s: %s", target, e)
 
 
 def load_settings() -> Settings:
