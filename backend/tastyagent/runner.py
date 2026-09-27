@@ -193,7 +193,26 @@ async def run_one_cycle(
     universe = watchlist or repo.symbols() or DEFAULT_WATCHLIST
 
     # 2. Working Capital & Account Balance
-    net_liq = runtime.starting_capital
+    use_custom_capital = getattr(runtime, "use_custom_working_capital", True)
+    if use_custom_capital:
+        net_liq = runtime.starting_capital
+        logger.info("Position sizing using custom working capital: $%.2f USD", net_liq)
+    else:
+        cash_summary = await client.get_account_cash_summary()
+        net_liq = cash_summary.total_cash_usd
+        logger.info(
+            "Position sizing using IBKR account Total Cash: $%.2f USD "
+            "(Base currency: %s, Total Cash Base: %.2f, Forex balances: %s)",
+            net_liq,
+            cash_summary.base_currency,
+            cash_summary.total_cash_base,
+            cash_summary.forex_balances,
+        )
+        if net_liq <= 0:
+            logger.warning(
+                "IBKR account Total Cash is non-positive ($%.2f USD). New entries will be halted per capital control.",
+                net_liq,
+            )
 
     # 3. Position & Exit Management (with Attached Take-Profit)
     exit_outcomes = []
@@ -280,11 +299,14 @@ async def run_one_cycle(
     # 8. Equity snapshot
     summary = summarize(ledger.all_trades())
     sp_close = await asyncio.to_thread(latest_sp500_close)
+    base_cap = (
+        runtime.starting_capital
+        if getattr(runtime, "use_custom_working_capital", True)
+        else net_liq
+    )
     session.add(
         EquitySnapshot(
-            net_liq=runtime.starting_capital
-            + summary.realized_pnl
-            + summary.unrealized_pnl,
+            net_liq=base_cap + summary.realized_pnl + summary.unrealized_pnl,
             realized_pnl_cum=summary.realized_pnl,
             unrealized_pnl=summary.unrealized_pnl,
             sp500_close=sp_close,

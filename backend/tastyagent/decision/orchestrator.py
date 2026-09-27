@@ -82,6 +82,14 @@ async def run_cycle(
     *,
     selector=select_trades,
 ) -> CycleResult:
+    if portfolio.net_liq <= 0:
+        return CycleResult(
+            planned=[],
+            rejected=[(c, "insufficient capital: net_liq <= 0") for c in candidates],
+            commentary=f"Account has non-positive capital (${portfolio.net_liq:,.2f}); new entries halted per capital control.",
+            considered=0,
+        )
+
     # 1. pre-guardrail filter
     passing = [c for c in candidates if validate_candidate(c, params).ok]
 

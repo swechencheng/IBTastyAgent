@@ -46,7 +46,10 @@ export default function Overview({ goTo }: { goTo: (r: string) => void }) {
   const aps = approvals.data || [];
   const pos = positions.data || [];
 
-  const cap = settings.data?.working_capital ?? p.starting_capital;
+  const cap =
+    settings.data?.use_custom_working_capital === false && settings.data?.account_cash_usd != null
+      ? settings.data.account_cash_usd
+      : (settings.data?.working_capital ?? p.starting_capital);
   const totalBpPct = Number(settings.data?.risk?.max_total_bp_pct ?? 0.4);
   const total = cap * totalBpPct;
   const used = pos.reduce((s, t) => s + (t.buying_power || 0), 0);

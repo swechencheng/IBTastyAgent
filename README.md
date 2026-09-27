@@ -108,8 +108,9 @@ Edit `backend/.env` (this file is gitignored — never commit real secrets):
 
 | Variable                     | Description                                                 | Default                        |
 | ---------------------------- | ----------------------------------------------------------- | ------------------------------ |
-| `TASTYAGENT_MODE`            | `sandbox` (paper auto-place), `live_approval`, `live_auto`  | `sandbox`                      |
-| `TASTYAGENT_WORKING_CAPITAL` | Simulated capital base to size trades against ($)           | `10000.0`                      |
+| `TASTYAGENT_MODE`                        | `sandbox` (paper auto-place), `live_approval`, `live_auto`  | `sandbox`                      |
+| `TASTYAGENT_USE_CUSTOM_WORKING_CAPITAL` | When `true`, use custom working capital; when `false`, use IBKR Total Cash | `true`                         |
+| `TASTYAGENT_WORKING_CAPITAL`             | Custom capital base to size trades against ($)              | `10000.0`                      |
 | `IBKR_HOST`                  | Host IP for trading IBKR Gateway / TWS                      | `127.0.0.1`                    |
 | `IBKR_PORT`                  | Socket port for trading gateway (`4002` paper, `4001` live) | `4002`                         |
 | `IBKR_CLIENT_ID`             | Unique client ID for trading connection                     | `45`                           |

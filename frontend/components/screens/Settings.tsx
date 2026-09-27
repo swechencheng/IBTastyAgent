@@ -15,6 +15,7 @@ import { ErrorNote, Loading, PageHeader } from "@/components/common";
 import { cn } from "@/lib/utils";
 
 type Form = {
+  useCustomCapital: boolean;
   working_capital: number;
   intervalMin: number;
   marketHours: boolean;
@@ -41,6 +42,7 @@ function fromSettings(s: SettingsT): Form {
   const st = s.strategy;
   const rk = s.risk;
   return {
+    useCustomCapital: s.use_custom_working_capital ?? true,
     working_capital: s.working_capital,
     intervalMin: Math.round(s.scheduler.interval_seconds / 60),
     marketHours: !!s.scheduler.market_hours_only,
@@ -64,6 +66,7 @@ function fromSettings(s: SettingsT): Form {
 
 function toPayload(f: Form): SettingsUpdate {
   return {
+    use_custom_working_capital: f.useCustomCapital,
     working_capital: f.working_capital,
     scheduler_interval_seconds: f.intervalMin * 60,
     scheduler_market_hours_only: f.marketHours,
@@ -128,13 +131,24 @@ function Field({
   );
 }
 
-function NInput({ value, onChange, w = 88 }: { value: number; onChange: (v: number) => void; w?: number }) {
+function NInput({
+  value,
+  onChange,
+  disabled = false,
+  w = 88,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+  disabled?: boolean;
+  w?: number;
+}) {
   return (
     <Input
       type="number"
       value={Number.isFinite(value) ? value : 0}
       onChange={(e) => onChange(Number(e.target.value))}
-      className="h-9 font-mono"
+      disabled={disabled}
+      className={cn("h-9 font-mono", disabled && "opacity-60 cursor-not-allowed")}
       style={{ width: w }}
     />
   );
@@ -233,12 +247,37 @@ export default function Settings({
               </Tabs>
             </Field>
             <Field
-              label="Working capital"
-              help="Capital the agent sizes positions against (not the broker balance)."
-              unit="$"
-              derived={`Per-trade BP cap = ${form.bpPerTrade}% × ${fmtMoney0(form.working_capital)} = ${fmtMoney0(Math.round((form.working_capital * form.bpPerTrade) / 100))}`}
+              label="Custom working capital"
+              help="When ON, size positions against custom capital below. When OFF, size dynamically against connected IBKR account Total Cash."
             >
-              <NInput value={form.working_capital} onChange={(v) => set("working_capital", v)} w={104} />
+              <Switch
+                checked={form.useCustomCapital}
+                onCheckedChange={(v) => set("useCustomCapital", v)}
+                aria-label="Custom working capital"
+              />
+            </Field>
+            <Field
+              label="Working capital"
+              help={
+                form.useCustomCapital
+                  ? "Capital the agent sizes positions against (fixed simulation)."
+                  : "Automatically using IBKR account Total Cash (USD equivalent across all forex positions)."
+              }
+              unit="$"
+              derived={
+                form.useCustomCapital
+                  ? `Per-trade BP cap = ${form.bpPerTrade}% × ${fmtMoney0(form.working_capital)} = ${fmtMoney0(Math.round((form.working_capital * form.bpPerTrade) / 100))}`
+                  : data?.account_cash_usd != null
+                  ? `IBKR Total Cash: ${fmtMoney0(data.account_cash_usd)} USD (Base: ${data.account_base_currency ?? "USD"} ${fmtMoney0(data.account_cash_base ?? data.account_cash_usd)}) · Per-trade cap = ${fmtMoney0(Math.round((data.account_cash_usd * form.bpPerTrade) / 100))}`
+                  : `Syncing with IBKR Total Cash... · Per-trade cap = ${form.bpPerTrade}%`
+              }
+            >
+              <NInput
+                value={form.useCustomCapital ? form.working_capital : (data?.account_cash_usd ?? form.working_capital)}
+                onChange={(v) => set("working_capital", v)}
+                disabled={!form.useCustomCapital}
+                w={104}
+              />
             </Field>
             <Field label="Cycle interval" help="How often the loop ticks while Auto is on (min 30s)." unit="min">
               <NInput value={form.intervalMin} onChange={(v) => set("intervalMin", v)} />

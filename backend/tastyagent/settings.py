@@ -101,8 +101,12 @@ class Settings(BaseSettings):
     openrouter_app_name: str = Field(
         default="IBTastyAgent", alias="OPENROUTER_APP_NAME"
     )
-    # Capital the agent sizes against. The sandbox account seeds at ~$1M with no
-    # withdrawal endpoint, so the agent simulates this working capital instead.
+    # Working capital sizing mode: custom working capital vs IBKR account Total Cash
+    use_custom_working_capital: bool = Field(
+        default=True,
+        alias="TASTYAGENT_USE_CUSTOM_WORKING_CAPITAL",
+        description="If True, size positions against custom working_capital. If False, size against IBKR Total Cash.",
+    )
     working_capital: float = Field(default=10_000.0, alias="TASTYAGENT_WORKING_CAPITAL")
 
     def strategy_params(self) -> StrategyParams:

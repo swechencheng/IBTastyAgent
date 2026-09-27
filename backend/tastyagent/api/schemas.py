@@ -140,7 +140,11 @@ class SchedulerConfig(BaseModel):
 class SettingsOut(BaseModel):
     mode: str
     kill_switch: bool
+    use_custom_working_capital: bool = True
     working_capital: float
+    account_cash_usd: float | None = None
+    account_cash_base: float | None = None
+    account_base_currency: str | None = None
     scheduler: SchedulerConfig
     strategy: dict  # StrategyParams fields
     risk: dict  # RiskLimits fields (excluding kill_switch, which is its own toggle)
@@ -149,6 +153,7 @@ class SettingsOut(BaseModel):
 class SettingsUpdate(BaseModel):
     """Partial update — send only the groups/fields that changed."""
 
+    use_custom_working_capital: bool | None = None
     working_capital: float | None = None
     scheduler_interval_seconds: float | None = None
     scheduler_market_hours_only: bool | None = None

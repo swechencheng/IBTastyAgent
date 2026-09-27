@@ -28,7 +28,10 @@ export default function PendingTrades() {
   if (approvals.error) return <ErrorNote msg="Could not load the approval queue." />;
   if (!approvals.data) return <Loading />;
 
-  const cap = settings.data?.working_capital ?? pnl.data?.starting_capital ?? 10000;
+  const cap =
+    settings.data?.use_custom_working_capital === false && settings.data?.account_cash_usd != null
+      ? settings.data.account_cash_usd
+      : (settings.data?.working_capital ?? pnl.data?.starting_capital ?? 10000);
   const totalBpPct = Number(settings.data?.risk?.max_total_bp_pct ?? 0.4);
   const total = cap * totalBpPct;
   const used = (positions.data || []).reduce((s, t) => s + (t.buying_power || 0), 0);

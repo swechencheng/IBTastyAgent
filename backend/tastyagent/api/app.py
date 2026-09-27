@@ -427,10 +427,26 @@ def create_app(
     def _settings_out(rt: Runtime) -> SettingsOut:
         risk = asdict(rt.risk)
         risk.pop("kill_switch", None)  # kill switch is its own dedicated toggle
+
+        cash_usd = None
+        cash_base = None
+        base_curr = None
+        client = getattr(app.state, "client", None)
+        if client:
+            summary = client.cached_cash_summary()
+            if summary:
+                cash_usd = summary.total_cash_usd
+                cash_base = summary.total_cash_base
+                base_curr = summary.base_currency
+
         return SettingsOut(
             mode=rt.mode.value,
             kill_switch=rt.kill_switch,
+            use_custom_working_capital=getattr(rt, "use_custom_working_capital", True),
             working_capital=rt.starting_capital,
+            account_cash_usd=cash_usd,
+            account_cash_base=cash_base,
+            account_base_currency=base_curr,
             scheduler=SchedulerConfig(
                 interval_seconds=rt.scheduler_interval_seconds,
                 market_hours_only=rt.scheduler_market_hours_only,
@@ -447,6 +463,8 @@ def create_app(
     def put_settings(
         req: SettingsUpdate, rt: Runtime = Depends(get_runtime)
     ) -> SettingsOut:
+        if req.use_custom_working_capital is not None:
+            rt.use_custom_working_capital = req.use_custom_working_capital
         if req.working_capital is not None:
             if req.working_capital <= 0:
                 raise HTTPException(400, "working_capital must be > 0")
@@ -617,6 +635,7 @@ def _default_app() -> FastAPI:
     init_db(engine)
     runtime = Runtime(
         mode=settings.mode,
+        use_custom_working_capital=settings.use_custom_working_capital,
         starting_capital=settings.working_capital,
         strategy=settings.strategy_params(),
     )

@@ -120,3 +120,19 @@ async def test_running_bp_accumulates_across_picks():
     assert len(res.planned) == 1
     planned_bp = sum(p.buying_power for p in res.planned)
     assert 37_000 + planned_bp <= LIMITS.max_total_bp_pct * 100_000
+
+
+async def test_non_positive_capital_halts_entries():
+    c = make_candidate(symbol="SPY")
+    # When net_liq is 0 or negative (insufficient/zero Total Cash), no entries can be planned
+    res = await run_cycle(
+        [c],
+        portfolio(net_liq=0.0),
+        {},
+        PARAMS,
+        LIMITS,
+        selector=selector_picking([(0, 1)]),
+    )
+    assert len(res.planned) == 0
+    assert len(res.rejected) == 1
+    assert "insufficient capital" in res.rejected[0][1]

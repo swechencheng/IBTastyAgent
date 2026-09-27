@@ -103,3 +103,161 @@ def test_ibkr_client_contract_details_patch():
     # If reqId not in results, it should silently return without error
     wrapper._results = {}
     wrapper.contractDetails(reqId=99999, contractDetails=None)
+
+
+async def test_get_account_cash_summary_usd_base():
+    from ib_async import AccountValue
+
+    settings = Settings(ibkr_account="U123456")
+    client = IBKRClient(settings)
+    client.trading_ib = MagicMock()
+    client.trading_ib.isConnected.return_value = True
+    client.trading_ib.managedAccounts.return_value = ["U123456"]
+    client.settings.mode = TradingMode.LIVE_AUTO
+    client.refresh_account()
+
+    client.trading_ib.accountValues.return_value = [
+        AccountValue(
+            account="U123456",
+            tag="Currency",
+            value="USD",
+            currency="BASE",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U123456",
+            tag="TotalCashBalance",
+            value="50000.0",
+            currency="BASE",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U123456",
+            tag="TotalCashBalance",
+            value="50000.0",
+            currency="USD",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U123456",
+            tag="NetLiquidation",
+            value="65000.0",
+            currency="BASE",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U123456",
+            tag="BuyingPower",
+            value="120000.0",
+            currency="BASE",
+            modelCode="",
+        ),
+    ]
+
+    summary = await client.get_account_cash_summary()
+    assert summary.base_currency == "USD"
+    assert summary.total_cash_base == 50000.0
+    assert summary.total_cash_usd == 50000.0
+    assert summary.net_liq_usd == 65000.0
+    assert summary.buying_power == 120000.0
+    assert summary.forex_balances == {"USD": 50000.0}
+
+
+async def test_get_account_cash_summary_eur_base_with_forex_conversion():
+    from ib_async import AccountValue
+
+    settings = Settings(ibkr_account="U123456")
+    client = IBKRClient(settings)
+    client.trading_ib = MagicMock()
+    client.trading_ib.isConnected.return_value = True
+    client.trading_ib.managedAccounts.return_value = ["U123456"]
+    client.settings.mode = TradingMode.LIVE_AUTO
+    client.refresh_account()
+
+    client.trading_ib.accountValues.return_value = [
+        AccountValue(
+            account="U123456",
+            tag="Currency",
+            value="EUR",
+            currency="BASE",
+            modelCode="",
+        ),
+        # Total cash in Base is 9200 EUR across EUR and USD
+        AccountValue(
+            account="U123456",
+            tag="TotalCashBalance",
+            value="9200.0",
+            currency="BASE",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U123456",
+            tag="TotalCashBalance",
+            value="7000.0",
+            currency="EUR",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U123456",
+            tag="TotalCashBalance",
+            value="2391.30",
+            currency="USD",
+            modelCode="",
+        ),
+        # 1 USD = 0.92 EUR
+        AccountValue(
+            account="U123456",
+            tag="ExchangeRate",
+            value="0.92",
+            currency="USD",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U123456",
+            tag="NetLiquidation",
+            value="18400.0",
+            currency="BASE",
+            modelCode="",
+        ),
+    ]
+
+    summary = await client.get_account_cash_summary()
+    assert summary.base_currency == "EUR"
+    assert summary.total_cash_base == 9200.0
+    # 9200.0 / 0.92 == 10000.0 USD
+    assert pytest.approx(summary.total_cash_usd, 0.01) == 10000.0
+    assert pytest.approx(summary.net_liq_usd, 0.01) == 20000.0
+    assert summary.forex_balances == {"EUR": 7000.0, "USD": 2391.30}
+
+
+async def test_get_account_cash_summary_negative_cash():
+    from ib_async import AccountValue
+
+    settings = Settings(ibkr_account="U123456")
+    client = IBKRClient(settings)
+    client.trading_ib = MagicMock()
+    client.trading_ib.isConnected.return_value = True
+    client.trading_ib.managedAccounts.return_value = ["U123456"]
+    client.settings.mode = TradingMode.LIVE_AUTO
+    client.refresh_account()
+
+    client.trading_ib.accountValues.return_value = [
+        AccountValue(
+            account="U123456",
+            tag="Currency",
+            value="USD",
+            currency="BASE",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U123456",
+            tag="TotalCashBalance",
+            value="-1500.0",
+            currency="BASE",
+            modelCode="",
+        ),
+    ]
+
+    summary = await client.get_account_cash_summary()
+    assert summary.total_cash_usd == -1500.0
+    assert summary.total_cash_base == -1500.0

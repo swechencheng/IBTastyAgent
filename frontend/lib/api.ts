@@ -158,13 +158,18 @@ export interface SchedulerConfig {
 export interface Settings {
   mode: string;
   kill_switch: boolean;
+  use_custom_working_capital: boolean;
   working_capital: number;
+  account_cash_usd?: number | null;
+  account_cash_base?: number | null;
+  account_base_currency?: string | null;
   scheduler: SchedulerConfig;
   strategy: Record<string, number | boolean>;
   risk: Record<string, number | boolean>;
 }
 
 export interface SettingsUpdate {
+  use_custom_working_capital?: boolean;
   working_capital?: number;
   scheduler_interval_seconds?: number;
   scheduler_market_hours_only?: boolean;

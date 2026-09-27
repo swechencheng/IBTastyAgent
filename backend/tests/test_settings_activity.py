@@ -31,6 +31,7 @@ def test_settings_get_shape():
     j = client().get("/api/settings").json()
     assert j["mode"] == "sandbox"
     assert j["working_capital"] == 10000.0
+    assert j["use_custom_working_capital"] is True
     assert "min_iv_rank" in j["strategy"] and "universe_top_n" in j["strategy"]
     assert "max_trade_bp_pct" in j["risk"]
     assert "kill_switch" not in j["risk"]  # kill switch is its own toggle
@@ -42,12 +43,14 @@ def test_settings_put_partial_update():
     r = c.put(
         "/api/settings",
         json={
+            "use_custom_working_capital": False,
             "working_capital": 25000,
             "scheduler_interval_seconds": 120,
             "strategy": {"min_iv_rank": 0.4, "universe_top_n": 20, "bogus": 1},
             "risk": {"max_trade_bp_pct": 0.08, "kill_switch": True},
         },
     ).json()
+    assert r["use_custom_working_capital"] is False
     assert r["working_capital"] == 25000
     assert r["scheduler"]["interval_seconds"] == 120
     assert r["strategy"]["min_iv_rank"] == 0.4
@@ -56,6 +59,7 @@ def test_settings_put_partial_update():
     assert r["risk"]["max_trade_bp_pct"] == 0.08
     # persisted on the runtime
     assert c.get("/api/settings").json()["strategy"]["min_iv_rank"] == 0.4
+    assert c.get("/api/settings").json()["use_custom_working_capital"] is False
 
 
 def test_settings_put_rejects_bad_capital():
