@@ -27,6 +27,24 @@ import { cn } from "@/lib/utils";
 
 const POLL = { refreshInterval: 8000 };
 
+function formatActivityTime(iso: string) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return { date: iso, time: "" };
+  return {
+    date: d.toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }),
+    time: d.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }),
+  };
+}
+
 export default function Overview({ goTo }: { goTo: (r: string) => void }) {
   const { mutate } = useSWRConfig();
   const pnl = useSWR<Pnl>("/api/pnl", fetcher, POLL);
@@ -167,6 +185,7 @@ export default function Overview({ goTo }: { goTo: (r: string) => void }) {
           </CardContent>
         </Card>
 
+
         <Card>
           <CardHeader className="flex-row items-center justify-between space-y-0">
             <CardTitle>Recent activity</CardTitle>
@@ -176,20 +195,37 @@ export default function Overview({ goTo }: { goTo: (r: string) => void }) {
           </CardHeader>
           <CardContent>
             {(activity.data || []).length > 0 ? (
-              <div className="flex flex-col gap-3.5">
-                {(activity.data || []).slice(0, 3).map((a) => (
-                  <div key={a.id} className="flex gap-3.5">
-                    <div className={cn("min-w-[120px] whitespace-nowrap text-xs text-text-faint", num)}>
-                      {new Date(a.created_at).toLocaleString()}
-                    </div>
-                    <div>
-                      <div className="text-[13px] font-medium">
-                        +{a.placed} placed · {a.considered} considered · {a.rejected} rejected
+              <div className="flex flex-col gap-4">
+                {(activity.data || []).slice(0, 3).map((a) => {
+                  const { date, time } = formatActivityTime(a.created_at);
+                  return (
+                    <div
+                      key={a.id}
+                      className="flex items-start gap-3.5 border-b border-border/40 pb-3.5 last:border-b-0 last:pb-0"
+                    >
+                      <div className="w-[84px] shrink-0 pt-0.5 font-mono tabular-nums leading-tight">
+                        <div className="text-xs font-medium text-foreground/80">{date}</div>
+                        <div className="text-[11px] text-muted-foreground/70">{time}</div>
                       </div>
-                      <div className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{a.commentary}</div>
+                      <div className="min-w-0 flex-1 border-l border-border/50 pl-3.5">
+                        <div className="flex flex-wrap items-center gap-1.5 text-[13px]">
+                          <span className={cn("font-medium", a.placed > 0 ? "font-semibold text-gain" : "text-foreground")}>
+                            +{a.placed} placed
+                          </span>
+                          <span className="text-muted-foreground/50">·</span>
+                          <span className="text-foreground">{a.considered} considered</span>
+                          <span className="text-muted-foreground/50">·</span>
+                          <span className={cn(a.rejected > 0 ? "font-semibold text-loss" : "text-muted-foreground")}>
+                            {a.rejected} rejected
+                          </span>
+                        </div>
+                        {a.commentary && (
+                          <div className="mt-1 text-xs leading-relaxed text-muted-foreground">{a.commentary}</div>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             ) : (
               <Empty>No decision cycles yet. Run one from the sidebar.</Empty>
