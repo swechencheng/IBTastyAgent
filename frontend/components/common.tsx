@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { ChevronLeft, ChevronRight, Loader2, TriangleAlert } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { cn, formatLocalDateTime } from "@/lib/utils";
 import { fmtMoney0, Trade, TradeEvent } from "@/lib/api";
 
 /* ---- Number helpers (presentation) --------------------------------------- */
@@ -172,7 +172,7 @@ export function PositionTimeline({ trade }: { trade: Trade }) {
             {i < events.length - 1 && <span className="my-0.5 min-h-3 w-0.5 flex-1 bg-border" />}
           </div>
           <div className="pb-3.5">
-            <div className={cn("text-xs text-text-faint", num)}>{new Date(e.ts).toLocaleString()}</div>
+            <div className={cn("text-xs text-text-faint", num)}>{formatLocalDateTime(e.ts)}</div>
             <div className="text-[13px]">
               <span className="font-medium">
                 {trade.symbol} — {EVENT_TITLE[e.kind] || e.kind}

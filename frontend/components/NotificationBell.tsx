@@ -6,7 +6,7 @@ import { toast } from "sonner";
 
 import { API_BASE, EventFeedItem } from "@/lib/api";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { cn } from "@/lib/utils";
+import { cn, parseUtcDate } from "@/lib/utils";
 
 const KIND_LABEL: Record<string, string> = {
   working: "Order working",
@@ -59,7 +59,7 @@ function fireToast(e: EventFeedItem) {
 }
 
 function relTime(iso: string): string {
-  const t = new Date(iso).getTime();
+  const t = parseUtcDate(iso).getTime();
   if (Number.isNaN(t)) return "";
   const s = Math.max(0, Math.round((Date.now() - t) / 1000));
   if (s < 45) return "just now";

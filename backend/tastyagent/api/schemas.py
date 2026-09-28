@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_serializer
+
+
+def _iso_utc(dt: datetime | None) -> str | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
 
 
 class LegOut(BaseModel):
@@ -22,6 +30,10 @@ class TradeEventOut(BaseModel):
     ts: datetime
     kind: str
     detail: str
+
+    @field_serializer("ts", when_used="json")
+    def serialize_ts(self, v: datetime) -> str | None:
+        return _iso_utc(v)
 
 
 class TradeOut(BaseModel):
@@ -47,6 +59,10 @@ class TradeOut(BaseModel):
     created_at: datetime | None = None
     legs: list[LegOut]
     events: list[TradeEventOut] = []
+
+    @field_serializer("opened_at", "closed_at", "created_at", when_used="json")
+    def serialize_dts(self, v: datetime | None) -> str | None:
+        return _iso_utc(v)
 
 
 class PnLOut(BaseModel):
@@ -180,6 +196,10 @@ class EventFeedItem(BaseModel):
     kind: str
     detail: str
 
+    @field_serializer("ts", when_used="json")
+    def serialize_ts(self, v: datetime) -> str | None:
+        return _iso_utc(v)
+
 
 class ActivityTrade(BaseModel):
     """One trade row inside a decision-cycle breakdown table."""
@@ -217,3 +237,7 @@ class ActivityItem(BaseModel):
     placed_trades: list[ActivityTrade] = []
     rejected_trades: list[ActivityTrade] = []
     managed_trades: list[ActivityTrade] = []
+
+    @field_serializer("created_at", when_used="json")
+    def serialize_created_at(self, v: datetime) -> str | None:
+        return _iso_utc(v)

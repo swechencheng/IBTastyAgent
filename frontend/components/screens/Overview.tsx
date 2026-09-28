@@ -23,26 +23,12 @@ import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import EquityChart from "@/components/EquityChart";
 import { BuyingPowerCard, Empty, ErrorNote, Kpi, Loading, PageHeader, num, pop, signClass } from "@/components/common";
-import { cn } from "@/lib/utils";
+import { cn, formatLocalDateParts } from "@/lib/utils";
 
 const POLL = { refreshInterval: 8000 };
 
 function formatActivityTime(iso: string) {
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return { date: iso, time: "" };
-  return {
-    date: d.toLocaleDateString(undefined, {
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }),
-    time: d.toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-    }),
-  };
+  return formatLocalDateParts(iso);
 }
 
 export default function Overview({ goTo }: { goTo: (r: string) => void }) {

@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Empty, ErrorNote, Loading, PageHeader, num, pop } from "@/components/common";
-import { cn } from "@/lib/utils";
+import { cn, formatLocalDateTime } from "@/lib/utils";
 
 const POLL = { refreshInterval: 8000 };
 
@@ -106,7 +106,7 @@ function Cycle({ a, defaultOpen }: { a: ActivityItem; defaultOpen: boolean }) {
       <div className="flex-1 pb-6">
         <div className="flex cursor-pointer flex-wrap items-center justify-between gap-4" onClick={() => setOpen(!open)}>
           <div className={cn("flex items-center gap-2.5 text-[13px] font-semibold", num)}>
-            {new Date(a.created_at).toLocaleString()}
+            {formatLocalDateTime(a.created_at)}
             <Badge variant="default" className="text-[11px]">{a.mode}</Badge>
           </div>
           <div className="flex items-center gap-3.5 text-xs text-muted-foreground">
