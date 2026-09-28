@@ -153,8 +153,12 @@ export const importWatchlist = (symbols: string[], source: string) =>
   post("/api/watchlist/import", { symbols, source });
 
 export const runCycle = () => post("/api/cycle/run");
-export const startScheduler = (interval_seconds = 300, market_hours_only = true) =>
-  post("/api/scheduler/start", { interval_seconds, market_hours_only });
+export const startScheduler = (interval_seconds?: number, market_hours_only?: boolean) => {
+  const body: Record<string, unknown> = {};
+  if (interval_seconds !== undefined) body.interval_seconds = interval_seconds;
+  if (market_hours_only !== undefined) body.market_hours_only = market_hours_only;
+  return post("/api/scheduler/start", Object.keys(body).length > 0 ? body : undefined);
+};
 export const stopScheduler = () => post("/api/scheduler/stop");
 
 // ---- Settings -------------------------------------------------------------

@@ -29,22 +29,69 @@ def is_market_open(now: datetime | None = None) -> bool:
     return MARKET_OPEN <= now.time() <= MARKET_CLOSE
 
 
+import time as time_mod
+
+
 async def run_loop(
     tick: Callable[[], Awaitable[None]],
     *,
-    interval_seconds: float = 300.0,
-    market_hours_only: bool = True,
+    interval_seconds: float | Callable[[], float] = 300.0,
+    market_hours_only: bool | Callable[[], bool] = True,
     stop: asyncio.Event | None = None,
+    wake_event: asyncio.Event | None = None,
+    get_last_tick_time: Callable[[], float | None] | None = None,
 ) -> None:
     """Run ``tick`` every ``interval_seconds`` until ``stop`` is set.
 
-    When ``market_hours_only`` is True, ticks outside market hours are skipped
-    (the loop keeps sleeping). Exceptions in a tick are swallowed and logged so a
-    single bad cycle never kills the loop.
+    Supports dynamic interval and market_hours getters (callables), early sleep
+    wake-up events (e.g. settings changed in dashboard), and avoids duplicate ticks
+    on start/restart if a cycle completed recently.
     """
     stop = stop or asyncio.Event()
+
     while not stop.is_set():
-        if not market_hours_only or is_market_open():
+        current_iv = (
+            interval_seconds() if callable(interval_seconds) else interval_seconds
+        )
+        current_iv = max(0.001, float(current_iv))
+
+        # Check if we should wait because a cycle ran recently
+        if get_last_tick_time is not None:
+            last_t = get_last_tick_time()
+            if last_t is not None:
+                elapsed = time_mod.time() - last_t
+                remaining = current_iv - elapsed
+                if remaining > 0:
+                    if wake_event is not None:
+                        wake_event.clear()
+                        stop_task = asyncio.create_task(stop.wait())
+                        wake_task = asyncio.create_task(wake_event.wait())
+                        try:
+                            done, pending = await asyncio.wait(
+                                [stop_task, wake_task],
+                                timeout=remaining,
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                        except asyncio.TimeoutError:
+                            pass
+                        finally:
+                            for p in (stop_task, wake_task):
+                                if not p.done():
+                                    p.cancel()
+                    else:
+                        try:
+                            await asyncio.wait_for(stop.wait(), timeout=remaining)
+                        except asyncio.TimeoutError:
+                            pass
+                    continue
+
+        if stop.is_set():
+            break
+
+        mh_only = (
+            market_hours_only() if callable(market_hours_only) else market_hours_only
+        )
+        if not mh_only or is_market_open():
             try:
                 await tick()
             except Exception as e:  # noqa: BLE001 - never let one cycle kill the loop
@@ -53,7 +100,34 @@ async def run_loop(
                 logging.getLogger("tastyagent.scheduler").exception(
                     "cycle failed: %s", e
                 )
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
-        except asyncio.TimeoutError:
-            pass
+
+        if stop.is_set():
+            break
+
+        # Re-fetch interval in case it changed during tick execution
+        current_iv = (
+            interval_seconds() if callable(interval_seconds) else interval_seconds
+        )
+        current_iv = max(0.001, float(current_iv))
+
+        if wake_event is not None:
+            wake_event.clear()
+            stop_task = asyncio.create_task(stop.wait())
+            wake_task = asyncio.create_task(wake_event.wait())
+            try:
+                done, pending = await asyncio.wait(
+                    [stop_task, wake_task],
+                    timeout=current_iv,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                for p in (stop_task, wake_task):
+                    if not p.done():
+                        p.cancel()
+        else:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=current_iv)
+            except asyncio.TimeoutError:
+                pass

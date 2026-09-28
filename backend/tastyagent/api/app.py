@@ -94,6 +94,24 @@ def create_app(
     app.state.env_file = Path(env_file).resolve() if env_file else None
     app.state.scheduler_task = None
     app.state.scheduler_stop = None
+    app.state.scheduler_wake = None
+    app.state.last_cycle_time = None
+
+    try:
+        with session_factory() as init_s:
+            from datetime import timezone
+
+            last_dec = init_s.scalar(
+                select(Decision.created_at)
+                .order_by(Decision.created_at.desc())
+                .limit(1)
+            )
+            if last_dec is not None:
+                if getattr(last_dec, "tzinfo", None) is None:
+                    last_dec = last_dec.replace(tzinfo=timezone.utc)
+                app.state.last_cycle_time = last_dec.timestamp()
+    except Exception:
+        app.state.last_cycle_time = None
 
     def _sync_env(updates: dict) -> None:
         target = getattr(app.state, "env_file", None)
@@ -279,12 +297,19 @@ def create_app(
             raise HTTPException(503, "no broker client configured on this server")
         from ..runner import run_one_cycle
 
-        return await run_one_cycle(
-            client=app.state.client,
-            metrics_session=app.state.metrics_session,
-            session=s,
-            runtime=rt,
-        )
+        try:
+            return await run_one_cycle(
+                client=app.state.client,
+                metrics_session=app.state.metrics_session,
+                session=s,
+                runtime=rt,
+            )
+        finally:
+            import time as time_mod
+
+            app.state.last_cycle_time = time_mod.time()
+            if getattr(app.state, "scheduler_wake", None) is not None:
+                app.state.scheduler_wake.set()
 
     async def _tick() -> None:
         sess = session_factory()
@@ -298,6 +323,9 @@ def create_app(
                 runtime=app.state.runtime,
             )
         finally:
+            import time as time_mod
+
+            app.state.last_cycle_time = time_mod.time()
             sess.close()
 
     @app.on_event("startup")
@@ -321,13 +349,21 @@ def create_app(
                 from ..scheduler import run_loop
 
                 stop = asyncio.Event()
+                wake = getattr(app.state, "scheduler_wake", None)
+                if wake is None:
+                    wake = asyncio.Event()
+                    app.state.scheduler_wake = wake
                 app.state.scheduler_stop = stop
                 app.state.scheduler_task = asyncio.create_task(
                     run_loop(
                         _tick,
-                        interval_seconds=app.state.runtime.scheduler_interval_seconds,
-                        market_hours_only=app.state.runtime.scheduler_market_hours_only,
+                        interval_seconds=lambda: app.state.runtime.scheduler_interval_seconds,
+                        market_hours_only=lambda: app.state.runtime.scheduler_market_hours_only,
                         stop=stop,
+                        wake_event=wake,
+                        get_last_tick_time=lambda: getattr(
+                            app.state, "last_cycle_time", None
+                        ),
                     )
                 )
 
@@ -335,6 +371,8 @@ def create_app(
     async def _on_shutdown() -> None:
         if app.state.scheduler_stop is not None:
             app.state.scheduler_stop.set()
+        if getattr(app.state, "scheduler_wake", None) is not None:
+            app.state.scheduler_wake.set()
         if app.state.client is not None:
             if hasattr(app.state.client, "stop_connection_monitor"):
                 app.state.client.stop_connection_monitor()
@@ -352,24 +390,38 @@ def create_app(
     ) -> StatusOut:
         if app.state.client is None:
             raise HTTPException(503, "no broker client configured")
+        body = body or {}
+        if "interval_seconds" in body and body["interval_seconds"] is not None:
+            rt.scheduler_interval_seconds = max(30.0, float(body["interval_seconds"]))
+            _sync_env({"scheduler_interval_seconds": rt.scheduler_interval_seconds})
+        if "market_hours_only" in body and body["market_hours_only"] is not None:
+            rt.scheduler_market_hours_only = bool(body["market_hours_only"])
+            _sync_env({"scheduler_market_hours_only": rt.scheduler_market_hours_only})
+
         if not scheduler_running():
             from ..scheduler import run_loop
 
-            body = body or {}
             stop = asyncio.Event()
+            wake = getattr(app.state, "scheduler_wake", None)
+            if wake is None:
+                wake = asyncio.Event()
+                app.state.scheduler_wake = wake
             app.state.scheduler_stop = stop
             app.state.scheduler_task = asyncio.create_task(
                 run_loop(
                     _tick,
-                    interval_seconds=float(
-                        body.get("interval_seconds", rt.scheduler_interval_seconds)
-                    ),
-                    market_hours_only=bool(
-                        body.get("market_hours_only", rt.scheduler_market_hours_only)
-                    ),
+                    interval_seconds=lambda: app.state.runtime.scheduler_interval_seconds,
+                    market_hours_only=lambda: app.state.runtime.scheduler_market_hours_only,
                     stop=stop,
+                    wake_event=wake,
+                    get_last_tick_time=lambda: getattr(
+                        app.state, "last_cycle_time", None
+                    ),
                 )
             )
+        elif getattr(app.state, "scheduler_wake", None) is not None:
+            app.state.scheduler_wake.set()
+
         rt.auto_start_scheduler = True
         os.environ["TASTYAGENT_AUTO_START_SCHEDULER"] = "true"
         _sync_env({"auto_start_scheduler": True})
@@ -379,6 +431,8 @@ def create_app(
     async def scheduler_stop(rt: Runtime = Depends(get_runtime)) -> StatusOut:
         if app.state.scheduler_stop is not None:
             app.state.scheduler_stop.set()
+        if getattr(app.state, "scheduler_wake", None) is not None:
+            app.state.scheduler_wake.set()
         rt.auto_start_scheduler = False
         os.environ["TASTYAGENT_AUTO_START_SCHEDULER"] = "false"
         _sync_env({"auto_start_scheduler": False})
@@ -532,8 +586,12 @@ def create_app(
             rt.starting_capital = req.working_capital
         if req.scheduler_interval_seconds is not None:
             rt.scheduler_interval_seconds = max(30.0, req.scheduler_interval_seconds)
+            if getattr(app.state, "scheduler_wake", None) is not None:
+                app.state.scheduler_wake.set()
         if req.scheduler_market_hours_only is not None:
             rt.scheduler_market_hours_only = req.scheduler_market_hours_only
+            if getattr(app.state, "scheduler_wake", None) is not None:
+                app.state.scheduler_wake.set()
         if req.strategy:
             rt.strategy = _apply_updates(rt.strategy, req.strategy)
         if req.risk:

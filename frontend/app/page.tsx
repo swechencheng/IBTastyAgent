@@ -169,8 +169,8 @@ export default function App() {
         await stopScheduler();
         toast.success("Scheduler stopped");
       } else {
-        const iv = settings.data?.scheduler.interval_seconds ?? 300;
-        const mh = settings.data?.scheduler.market_hours_only ?? true;
+        const iv = settings.data?.scheduler.interval_seconds;
+        const mh = settings.data?.scheduler.market_hours_only;
         await startScheduler(iv, mh);
         toast.success("Scheduler started");
       }
