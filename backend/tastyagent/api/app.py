@@ -130,12 +130,13 @@ def create_app(
             app.state.client, "connection_status"
         ):
             cs = app.state.client.connection_status
-            return ConnectionStatusOut(
-                real_connected=cs.real_connected,
-                paper_connected=cs.paper_connected,
-                status=cs.status,
-                detail=cs.detail,
-            )
+            if isinstance(getattr(cs, "status", None), str):
+                return ConnectionStatusOut(
+                    real_connected=bool(getattr(cs, "real_connected", False)),
+                    paper_connected=bool(getattr(cs, "paper_connected", False)),
+                    status=str(cs.status),
+                    detail=str(getattr(cs, "detail", "")),
+                )
         return ConnectionStatusOut(
             real_connected=False,
             paper_connected=False,
@@ -150,12 +151,13 @@ def create_app(
             app.state.client, "connection_status"
         ):
             cs = app.state.client.connection_status
-            conn = ConnectionStatusOut(
-                real_connected=cs.real_connected,
-                paper_connected=cs.paper_connected,
-                status=cs.status,
-                detail=cs.detail,
-            )
+            if isinstance(getattr(cs, "status", None), str):
+                conn = ConnectionStatusOut(
+                    real_connected=bool(getattr(cs, "real_connected", False)),
+                    paper_connected=bool(getattr(cs, "paper_connected", False)),
+                    status=str(cs.status),
+                    detail=str(getattr(cs, "detail", "")),
+                )
         return StatusOut(
             mode=rt.mode.value,
             kill_switch=rt.kill_switch,
@@ -309,11 +311,12 @@ def create_app(
                 )
             if hasattr(app.state.client, "start_connection_monitor"):
                 app.state.client.start_connection_monitor()
-        if os.environ.get("TASTYAGENT_AUTO_START_SCHEDULER", "false").lower() in (
-            "1",
-            "true",
-            "yes",
-        ):
+        auto_start = os.environ.get(
+            "TASTYAGENT_AUTO_START_SCHEDULER", "false"
+        ).lower() in ("1", "true", "yes") or getattr(
+            app.state.runtime, "auto_start_scheduler", False
+        )
+        if auto_start:
             if not scheduler_running():
                 from ..scheduler import run_loop
 
@@ -367,12 +370,18 @@ def create_app(
                     stop=stop,
                 )
             )
+        rt.auto_start_scheduler = True
+        os.environ["TASTYAGENT_AUTO_START_SCHEDULER"] = "true"
+        _sync_env({"auto_start_scheduler": True})
         return status(rt)
 
     @app.post("/api/scheduler/stop", response_model=StatusOut)
     async def scheduler_stop(rt: Runtime = Depends(get_runtime)) -> StatusOut:
         if app.state.scheduler_stop is not None:
             app.state.scheduler_stop.set()
+        rt.auto_start_scheduler = False
+        os.environ["TASTYAGENT_AUTO_START_SCHEDULER"] = "false"
+        _sync_env({"auto_start_scheduler": False})
         return status(rt)
 
     # --- watchlist (the agent's trading universe) ---
@@ -695,6 +704,7 @@ def _default_app() -> FastAPI:
         risk=settings.risk_limits(),
         scheduler_interval_seconds=settings.scheduler_interval_seconds,
         scheduler_market_hours_only=settings.scheduler_market_hours_only,
+        auto_start_scheduler=settings.auto_start_scheduler,
     )
 
     client = IBKRClient(settings)

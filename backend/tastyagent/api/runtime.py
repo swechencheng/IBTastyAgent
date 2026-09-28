@@ -21,6 +21,7 @@ class Runtime:
     risk: RiskLimits = field(default_factory=RiskLimits)
     scheduler_interval_seconds: float = 300.0
     scheduler_market_hours_only: bool = True
+    auto_start_scheduler: bool = False
     ibkr_walk_step: float = 0.01
     ibkr_walk_interval: int = 5
     ibkr_attach_tp: bool = True

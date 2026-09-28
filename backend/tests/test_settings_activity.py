@@ -1,3 +1,4 @@
+from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -175,3 +176,25 @@ def test_put_settings_syncs_to_configured_env_file(tmp_path):
     assert "TASTYAGENT_TARGET_SHORT_DELTA=0.18" in content
     assert "TASTYAGENT_MAX_TRADE_BP_PCT=0.09" in content
     assert "TASTYAGENT_MODE=live_approval" in content
+
+
+def test_scheduler_toggle_syncs_auto_start_to_env_file(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("TASTYAGENT_MODE=sandbox\n")
+
+    mock_client = MagicMock()
+    app = create_app(
+        factory(),
+        Runtime(mode=TradingMode.SANDBOX),
+        client=mock_client,
+        env_file=env_file,
+    )
+    c = TestClient(app)
+
+    c.post("/api/scheduler/start")
+    content = env_file.read_text()
+    assert "TASTYAGENT_AUTO_START_SCHEDULER=true" in content
+
+    c.post("/api/scheduler/stop")
+    content = env_file.read_text()
+    assert "TASTYAGENT_AUTO_START_SCHEDULER=false" in content

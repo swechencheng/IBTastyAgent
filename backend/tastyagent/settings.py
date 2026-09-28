@@ -129,6 +129,11 @@ class Settings(BaseSettings):
         default=True,
         alias="TASTYAGENT_SCHEDULER_MARKET_HOURS_ONLY",
     )
+    auto_start_scheduler: bool = Field(
+        default=False,
+        alias="TASTYAGENT_AUTO_START_SCHEDULER",
+        description="Whether to automatically start the trading scheduler on startup",
+    )
 
     def strategy_params(self) -> StrategyParams:
         return _merge(StrategyParams(), _StrategyEnv())
@@ -202,6 +207,17 @@ def persist_settings_to_env(
             (
                 "TASTYAGENT_SCHEDULER_MARKET_HOURS_ONLY",
                 "true" if updates["scheduler_market_hours_only"] else "false",
+            )
+        )
+
+    if (
+        "auto_start_scheduler" in updates
+        and updates["auto_start_scheduler"] is not None
+    ):
+        key_value_pairs.append(
+            (
+                "TASTYAGENT_AUTO_START_SCHEDULER",
+                "true" if updates["auto_start_scheduler"] else "false",
             )
         )
 
