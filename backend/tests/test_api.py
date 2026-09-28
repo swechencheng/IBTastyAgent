@@ -123,3 +123,41 @@ def test_approval_flow():
     res = client.post(f"/api/approvals/{tid}/approve").json()
     assert res["action"] == "placed"
     assert client.get("/api/approvals").json() == []  # no longer pending
+
+
+def test_connection_endpoint():
+    c = sandbox_client()
+    r = c.get("/api/connection")
+    assert r.status_code == 200
+    assert r.json()["status"] == "disconnected"
+
+
+def test_status_with_client_connection():
+    from unittest.mock import MagicMock
+    from tastyagent.ibkr.client import ConnectionStatus
+
+    sf = shared_factory()
+    mock_client = MagicMock()
+    mock_client.connection_status = ConnectionStatus(
+        real_connected=True,
+        paper_connected=True,
+        status="connected",
+        detail="All gateways online (Paper + Live Data)",
+    )
+    app = create_app(
+        sf,
+        Runtime(mode=TradingMode.SANDBOX, starting_capital=1_000_000),
+        client=mock_client,
+    )
+    client = TestClient(app)
+    r = client.get("/api/status")
+    assert r.status_code == 200
+    conn = r.json()["connection"]
+    assert conn is not None
+    assert conn["status"] == "connected"
+    assert conn["real_connected"] is True
+    assert conn["paper_connected"] is True
+
+    r_conn = client.get("/api/connection")
+    assert r_conn.status_code == 200
+    assert r_conn.json()["status"] == "connected"

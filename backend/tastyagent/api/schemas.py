@@ -62,6 +62,13 @@ class PnLOut(BaseModel):
     starting_capital: float
 
 
+class ConnectionStatusOut(BaseModel):
+    real_connected: bool
+    paper_connected: bool
+    status: str  # "connected" | "warning" | "disconnected"
+    detail: str
+
+
 class StatusOut(BaseModel):
     mode: str
     kill_switch: bool
@@ -69,6 +76,7 @@ class StatusOut(BaseModel):
     starting_capital: float
     requires_approval: bool
     scheduler_running: bool = False
+    connection: ConnectionStatusOut | None = None
 
 
 class BenchmarkPoint(BaseModel):

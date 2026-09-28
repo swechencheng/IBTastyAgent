@@ -66,7 +66,9 @@ def _merge(defaults, env_model):
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", extra="ignore", populate_by_name=True
+    )
 
     mode: TradingMode = Field(default=TradingMode.SANDBOX, alias="TASTYAGENT_MODE")
     api_host: str = Field(default="0.0.0.0", alias="TASTYAGENT_HOST")

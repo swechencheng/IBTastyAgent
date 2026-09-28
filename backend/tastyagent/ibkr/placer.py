@@ -68,7 +68,7 @@ class IBKRPlacer:
 
     @property
     def ib(self) -> IB:
-        return self.client.trading_ib
+        return self.client.active_trading_ib
 
     async def _qualify_leg(self, symbol: str, leg: TradeLeg) -> Option:
         """Create and qualify an Option contract for a trade leg."""

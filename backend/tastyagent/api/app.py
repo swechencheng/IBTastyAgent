@@ -35,6 +35,7 @@ from .schemas import (
     ActivityTrade,
     BenchmarkOut,
     BenchmarkPoint,
+    ConnectionStatusOut,
     EventFeedItem,
     KillSwitchRequest,
     ModeRequest,
@@ -123,8 +124,38 @@ def create_app(
     def health() -> dict:
         return {"status": "ok"}
 
+    @app.get("/api/connection", response_model=ConnectionStatusOut)
+    def connection() -> ConnectionStatusOut:
+        if app.state.client is not None and hasattr(
+            app.state.client, "connection_status"
+        ):
+            cs = app.state.client.connection_status
+            return ConnectionStatusOut(
+                real_connected=cs.real_connected,
+                paper_connected=cs.paper_connected,
+                status=cs.status,
+                detail=cs.detail,
+            )
+        return ConnectionStatusOut(
+            real_connected=False,
+            paper_connected=False,
+            status="disconnected",
+            detail="No IBKR client configured",
+        )
+
     @app.get("/api/status", response_model=StatusOut)
     def status(rt: Runtime = Depends(get_runtime)) -> StatusOut:
+        conn = None
+        if app.state.client is not None and hasattr(
+            app.state.client, "connection_status"
+        ):
+            cs = app.state.client.connection_status
+            conn = ConnectionStatusOut(
+                real_connected=cs.real_connected,
+                paper_connected=cs.paper_connected,
+                status=cs.status,
+                detail=cs.detail,
+            )
         return StatusOut(
             mode=rt.mode.value,
             kill_switch=rt.kill_switch,
@@ -132,6 +163,7 @@ def create_app(
             starting_capital=rt.starting_capital,
             requires_approval=rt.mode.requires_approval,
             scheduler_running=scheduler_running(),
+            connection=conn,
         )
 
     @app.get("/api/trades", response_model=list[TradeOut])
@@ -275,6 +307,8 @@ def create_app(
                 logging.getLogger("tastyagent.api").warning(
                     "IBKR connection failed on startup: %s", e
                 )
+            if hasattr(app.state.client, "start_connection_monitor"):
+                app.state.client.start_connection_monitor()
         if os.environ.get("TASTYAGENT_AUTO_START_SCHEDULER", "false").lower() in (
             "1",
             "true",
@@ -298,13 +332,16 @@ def create_app(
     async def _on_shutdown() -> None:
         if app.state.scheduler_stop is not None:
             app.state.scheduler_stop.set()
-        if app.state.client is not None and hasattr(app.state.client, "disconnect"):
-            try:
-                await app.state.client.disconnect()
-            except Exception as e:
-                logging.getLogger("tastyagent.api").debug(
-                    "IBKR disconnect on shutdown: %s", e
-                )
+        if app.state.client is not None:
+            if hasattr(app.state.client, "stop_connection_monitor"):
+                app.state.client.stop_connection_monitor()
+            if hasattr(app.state.client, "disconnect"):
+                try:
+                    await app.state.client.disconnect()
+                except Exception as e:
+                    logging.getLogger("tastyagent.api").debug(
+                        "IBKR disconnect on shutdown: %s", e
+                    )
 
     @app.post("/api/scheduler/start", response_model=StatusOut)
     async def scheduler_start(

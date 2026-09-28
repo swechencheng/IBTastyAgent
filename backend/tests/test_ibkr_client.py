@@ -261,3 +261,101 @@ async def test_get_account_cash_summary_negative_cash():
     summary = await client.get_account_cash_summary()
     assert summary.total_cash_usd == -1500.0
     assert summary.total_cash_base == -1500.0
+
+
+def test_connection_status_real_disconnected():
+    settings = Settings(mode=TradingMode.SANDBOX)
+    client = IBKRClient(settings)
+    client.data_ib = MagicMock()
+    client.data_ib.isConnected.return_value = False
+    client.trading_ib = MagicMock()
+    client.trading_ib.isConnected.return_value = True
+
+    status = client.connection_status
+    assert status.status == "disconnected"
+    assert not status.real_connected
+    assert status.paper_connected
+    assert not client.is_connected
+
+
+def test_connection_status_sandbox_paper_disconnected_is_warning():
+    settings = Settings(mode=TradingMode.SANDBOX)
+    client = IBKRClient(settings)
+    client.data_ib = MagicMock()
+    client.data_ib.isConnected.return_value = True
+    client.trading_ib = MagicMock()
+    client.trading_ib.isConnected.return_value = False
+
+    status = client.connection_status
+    assert status.status == "warning"
+    assert status.real_connected
+    assert not status.paper_connected
+    assert client.is_connected
+
+
+def test_connection_status_sandbox_both_connected_is_connected():
+    settings = Settings(mode=TradingMode.SANDBOX)
+    client = IBKRClient(settings)
+    client.data_ib = MagicMock()
+    client.data_ib.isConnected.return_value = True
+    client.trading_ib = MagicMock()
+    client.trading_ib.isConnected.return_value = True
+
+    status = client.connection_status
+    assert status.status == "connected"
+    assert status.real_connected
+    assert status.paper_connected
+    assert client.is_connected
+
+
+def test_connection_status_live_mode_real_connected_paper_offline_is_connected():
+    for live_mode in (TradingMode.LIVE_APPROVAL, TradingMode.LIVE_AUTO):
+        settings = Settings(mode=live_mode, ibkr_account="U123456")
+        client = IBKRClient(settings)
+        client.data_ib = MagicMock()
+        client.data_ib.isConnected.return_value = True
+        client.trading_ib = MagicMock()
+        client.trading_ib.isConnected.return_value = False
+
+        status = client.connection_status
+        assert status.status == "connected"
+        assert status.real_connected
+        assert not status.paper_connected
+        assert client.is_connected
+
+
+def test_connection_status_live_mode_real_offline_is_disconnected():
+    for live_mode in (TradingMode.LIVE_APPROVAL, TradingMode.LIVE_AUTO):
+        settings = Settings(mode=live_mode, ibkr_account="U123456")
+        client = IBKRClient(settings)
+        client.data_ib = MagicMock()
+        client.data_ib.isConnected.return_value = False
+        client.trading_ib = MagicMock()
+        client.trading_ib.isConnected.return_value = True
+
+        status = client.connection_status
+        assert status.status == "disconnected"
+        assert not client.is_connected
+
+
+def test_active_trading_ib_routing():
+    client = IBKRClient(Settings(mode=TradingMode.SANDBOX))
+    assert client.active_trading_ib == client.trading_ib
+
+    client_live = IBKRClient(Settings(mode=TradingMode.LIVE_AUTO))
+    client_live.data_ib = MagicMock()
+    client_live.data_ib.isConnected.return_value = True
+    assert client_live.active_trading_ib == client_live.data_ib
+
+
+async def test_start_stop_connection_monitor():
+    settings = Settings(mode=TradingMode.SANDBOX)
+    client = IBKRClient(settings)
+    assert client._monitor_task is None
+    client.start_connection_monitor()
+    assert client._monitor_running is True
+    assert client._monitor_task is not None
+
+    client.stop_connection_monitor()
+    assert client._monitor_running is False
+    assert client._monitor_task is None

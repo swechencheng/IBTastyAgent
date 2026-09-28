@@ -28,6 +28,7 @@ import {
   startScheduler,
   Settings as SettingsT,
   Status,
+  ConnectionStatus,
   stopScheduler,
   Trade,
   fmtMoneySigned,
@@ -62,6 +63,54 @@ const NAV = [
   { id: "activity", label: "Activity", icon: ActivityIcon },
   { id: "settings", label: "Settings", icon: SettingsIcon },
 ];
+
+function ConnectionBadge({ conn, className }: { conn?: ConnectionStatus | null; className?: string }) {
+  const status = conn?.status ?? "disconnected";
+  const detail = conn?.detail ?? (status === "connected" ? "Connected to IBKR" : "Disconnected from IBKR");
+
+  if (status === "connected") {
+    return (
+      <div
+        className={cn(
+          "inline-flex items-center gap-1.5 rounded-full border border-gain/30 bg-gain-soft/30 px-2.5 py-0.5 text-[11px] font-medium text-gain transition-all cursor-default select-none",
+          className
+        )}
+        title={detail}
+      >
+        <span className="live-dot size-2 rounded-full bg-gain" />
+        <span>Live</span>
+      </div>
+    );
+  }
+
+  if (status === "warning") {
+    return (
+      <div
+        className={cn(
+          "inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-2.5 py-0.5 text-[11px] font-medium text-amber-400 transition-all cursor-default select-none",
+          className
+        )}
+        title={detail}
+      >
+        <span className="size-2 rounded-full bg-amber-400 animate-pulse" />
+        <span>Paper Offline</span>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full border border-loss/40 bg-loss/10 px-2.5 py-0.5 text-[11px] font-medium text-loss transition-all cursor-default select-none",
+        className
+      )}
+      title={detail}
+    >
+      <span className="size-2 rounded-full bg-loss" />
+      <span>Disconnected</span>
+    </div>
+  );
+}
 
 export default function App() {
   const { mutate } = useSWRConfig();
@@ -232,12 +281,7 @@ export default function App() {
           </span>
         </div>
 
-        {s?.scheduler_running && (
-          <div className="hidden items-center gap-2 text-[11px] text-text-faint md:inline-flex">
-            <span className="live-dot size-2 rounded-full bg-gain" />
-            live
-          </div>
-        )}
+        <ConnectionBadge conn={s?.connection} className="hidden md:inline-flex" />
 
         <NotificationBell />
 
@@ -297,6 +341,7 @@ export default function App() {
 
         {/* Row 2: Action bar (scrollable pills, no wrap, no overflow) */}
         <div className="flex items-center gap-2 px-3 py-1.5 overflow-x-auto no-scrollbar bg-surface/30">
+          <ConnectionBadge conn={s?.connection} className="shrink-0" />
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border bg-surface-2 px-2.5 py-1 text-xs text-foreground hover:border-border-strong">

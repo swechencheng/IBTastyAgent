@@ -232,7 +232,7 @@ async def run_one_cycle(
     if isinstance(placer, IBKRPlacer):
         # Audit open positions for missing Take-Profit orders
         try:
-            open_trades = client.trading_ib.openTrades()
+            open_trades = client.active_trading_ib.openTrades()
             active_ids = {str(t.order.orderId) for t in open_trades if t.isActive()}
             tp_alerts = await audit_take_profit_orders(ledger, active_ids)
         except Exception as e:
@@ -290,7 +290,7 @@ async def run_one_cycle(
 
     # 7. Reconcile fills against active IBKR orders
     try:
-        open_trades = client.trading_ib.openTrades()
+        open_trades = client.active_trading_ib.openTrades()
         status_map = {str(t.order.orderId): t.orderStatus.status for t in open_trades}
         reconcile_fills(ledger, status_map)
     except Exception as e:

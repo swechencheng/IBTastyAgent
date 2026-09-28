@@ -10,6 +10,13 @@ export function getApiBase(): string {
 
 export const API_BASE = getApiBase();
 
+export interface ConnectionStatus {
+  real_connected: boolean;
+  paper_connected: boolean;
+  status: "connected" | "warning" | "disconnected" | string;
+  detail: string;
+}
+
 export interface Status {
   mode: string;
   kill_switch: boolean;
@@ -17,6 +24,7 @@ export interface Status {
   starting_capital: number;
   requires_approval: boolean;
   scheduler_running: boolean;
+  connection?: ConnectionStatus | null;
 }
 
 export interface Pnl {

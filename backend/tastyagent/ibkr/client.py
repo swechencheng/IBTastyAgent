@@ -48,20 +48,100 @@ class AccountCashSummary:
     forex_balances: dict[str, float] = field(default_factory=dict)
 
 
+@dataclass
+class ConnectionStatus:
+    """Status summary of dual-gateway IBKR connections."""
+
+    real_connected: bool
+    paper_connected: bool
+    status: str  # "connected" | "warning" | "disconnected"
+    detail: str
+
+
 class IBKRClient:
     """Manages connections to Interactive Brokers gateway/TWS sessions."""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.trading_ib: IB = IB()
-        self.data_ib: IB = IB()
+        self.trading_ib: IB = IB()  # Paper trading gateway (e.g. port 4002)
+        self.data_ib: IB = (
+            IB()
+        )  # Real account / Live market data gateway (e.g. port 4001)
         self._trading_account: Optional[str] = None
         self._connected = False
         self._last_cash_summary: Optional[AccountCashSummary] = None
+        self._monitor_task: Optional[asyncio.Task] = None
+        self._monitor_running: bool = False
+
+    @property
+    def active_trading_ib(self) -> IB:
+        """Active IB session used for trading orders and account queries in current mode.
+
+        In live modes (LIVE_APPROVAL, LIVE_AUTO):
+        - Strictly uses data_ib (real gateway, e.g. port 4001).
+        - If data_ib is not connected but trading_ib is connected (e.g. in mock tests),
+          falls back to trading_ib.
+        In sandbox / backtest:
+        - Uses trading_ib (paper gateway, e.g. port 4002).
+        """
+        if self.settings.mode.is_live:
+            if getattr(self, "data_ib", None) and (
+                self.data_ib.isConnected()
+                or not getattr(self.trading_ib, "isConnected", lambda: False)()
+            ):
+                return self.data_ib
+            if getattr(self, "trading_ib", None) and self.trading_ib.isConnected():
+                return self.trading_ib
+            return self.data_ib
+        return self.trading_ib
+
+    @property
+    def connection_status(self) -> ConnectionStatus:
+        """Compute connection status according to current trading mode.
+
+        Rules:
+        1. live_approval / live_auto:
+           - Only uses real account / data client (data_ib).
+           - If real client is connected -> "connected" (green live flashing), regardless of paper client.
+           - If real client is disconnected -> "disconnected" (red).
+        2. sandbox:
+           - Real client supplies market data; paper client places orders.
+           - If real client is disconnected -> "disconnected" (red).
+           - If real client is connected but paper client is disconnected -> "warning" (yellow).
+           - If both are connected -> "connected" (green live flashing).
+        """
+        real_ok = bool(self.data_ib and self.data_ib.isConnected())
+        paper_ok = bool(self.trading_ib and self.trading_ib.isConnected())
+        mode = self.settings.mode
+
+        if mode.is_live:
+            if real_ok:
+                status = "connected"
+                detail = f"Live gateway connected ({self.account or 'real'})"
+            else:
+                status = "disconnected"
+                detail = "Live trading gateway disconnected"
+        else:
+            if not real_ok:
+                status = "disconnected"
+                detail = "Market data / Real gateway disconnected"
+            elif not paper_ok:
+                status = "warning"
+                detail = "Paper trading gateway offline"
+            else:
+                status = "connected"
+                detail = "All gateways online (Paper + Live Data)"
+
+        return ConnectionStatus(
+            real_connected=real_ok,
+            paper_connected=paper_ok,
+            status=status,
+            detail=detail,
+        )
 
     @property
     def is_connected(self) -> bool:
-        return self._connected and self.trading_ib.isConnected()
+        return self.connection_status.status in ("connected", "warning")
 
     def _resolve_account(self, managed: list[str]) -> None:
         """Resolve active trading account based on current mode and connected gateway accounts.
@@ -112,17 +192,17 @@ class IBKRClient:
             else:
                 self._trading_account = ""
 
-        if self._trading_account and self.trading_ib.isConnected():
+        active = self.active_trading_ib
+        if self._trading_account and active.isConnected():
             try:
-                self.trading_ib.reqAccountUpdates(self._trading_account)
+                active.reqAccountUpdates(self._trading_account)
             except Exception as e:
                 logger.debug("reqAccountUpdates failed: %s", e)
 
     def refresh_account(self) -> str:
         """Refresh and return the active trading account based on current mode."""
-        managed = (
-            self.trading_ib.managedAccounts() if self.trading_ib.isConnected() else []
-        )
+        active = self.active_trading_ib
+        managed = active.managedAccounts() if active.isConnected() else []
         self._resolve_account(managed)
         return self._trading_account or ""
 
@@ -133,10 +213,11 @@ class IBKRClient:
         IBKR_ACCOUNT is strictly reserved for real account live trading (LIVE_APPROVAL / LIVE_AUTO).
         In sandbox mode, IBKR_ACCOUNT is never used; the connected paper gateway account is used instead.
         """
+        active = self.active_trading_ib
         if not self.settings.mode.is_live:
             if self._trading_account:
                 return self._trading_account
-            accounts = self.trading_ib.managedAccounts()
+            accounts = active.managedAccounts() if active.isConnected() else []
             if accounts:
                 return accounts[0]
             return ""
@@ -146,66 +227,144 @@ class IBKRClient:
             return self._trading_account
         if self.settings.ibkr_account:
             return self.settings.ibkr_account
-        accounts = self.trading_ib.managedAccounts()
+        accounts = active.managedAccounts() if active.isConnected() else []
         if accounts:
             return accounts[0]
         return ""
 
-    async def connect(self, timeout: float = 10.0) -> None:
-        """Establish connections to trading and data gateways."""
-        logger.info(
-            "Connecting to IBKR Trading Gateway at %s:%s (clientId=%s)...",
-            self.settings.ibkr_host,
-            self.settings.ibkr_port,
-            self.settings.ibkr_client_id,
-        )
-
-        # Connect trading session
-        await self.trading_ib.connectAsync(
-            host=self.settings.ibkr_host,
-            port=self.settings.ibkr_port,
-            clientId=self.settings.ibkr_client_id,
-            timeout=timeout,
-            readonly=False,
-        )
-
-        managed = self.trading_ib.managedAccounts()
-        logger.info("Trading gateway connected. Managed accounts: %s", managed)
-
-        self._resolve_account(managed)
-
-        # Connect data session
-        logger.info(
-            "Connecting to IBKR Market Data Gateway at %s:%s (clientId=%s)...",
-            self.settings.ibkr_data_host,
-            self.settings.ibkr_data_port,
-            self.settings.ibkr_data_client_id,
-        )
-
+    async def _try_connect_data(self, timeout: float = 5.0) -> bool:
+        if self.data_ib.isConnected():
+            return True
         try:
+            logger.debug(
+                "Connecting Real/Data Gateway at %s:%s (clientId=%s)...",
+                self.settings.ibkr_data_host,
+                self.settings.ibkr_data_port,
+                self.settings.ibkr_data_client_id,
+            )
             await self.data_ib.connectAsync(
                 host=self.settings.ibkr_data_host,
                 port=self.settings.ibkr_data_port,
                 clientId=self.settings.ibkr_data_client_id,
                 timeout=timeout,
-                readonly=True,
+                readonly=False,  # Can place orders when live trading
             )
-            logger.info("Market data gateway connected.")
+            logger.info(
+                "Real/Data Gateway connected at %s:%s",
+                self.settings.ibkr_data_host,
+                self.settings.ibkr_data_port,
+            )
+            try:
+                self.data_ib.reqMarketDataType(3)
+            except Exception:
+                pass
+            if self.settings.mode.is_live:
+                self.refresh_account()
+            return True
         except Exception as e:
-            logger.warning(
-                "Could not connect to separate market data gateway (%s). Reusing trading session for data: %s",
-                f"{self.settings.ibkr_data_host}:{self.settings.ibkr_data_port}",
+            logger.debug(
+                "Real/Data Gateway connection attempt failed (%s:%s): %s",
+                self.settings.ibkr_data_host,
+                self.settings.ibkr_data_port,
                 e,
             )
-            self.data_ib = self.trading_ib
+            return False
 
+    async def _try_connect_trading(self, timeout: float = 5.0) -> bool:
+        if self.trading_ib.isConnected():
+            return True
+        try:
+            logger.debug(
+                "Connecting Paper Gateway at %s:%s (clientId=%s)...",
+                self.settings.ibkr_host,
+                self.settings.ibkr_port,
+                self.settings.ibkr_client_id,
+            )
+            await self.trading_ib.connectAsync(
+                host=self.settings.ibkr_host,
+                port=self.settings.ibkr_port,
+                clientId=self.settings.ibkr_client_id,
+                timeout=timeout,
+                readonly=False,
+            )
+            logger.info(
+                "Paper Gateway connected at %s:%s",
+                self.settings.ibkr_host,
+                self.settings.ibkr_port,
+            )
+            if not self.settings.mode.is_live:
+                self.refresh_account()
+            return True
+        except Exception as e:
+            logger.debug(
+                "Paper Gateway connection attempt failed (%s:%s): %s",
+                self.settings.ibkr_host,
+                self.settings.ibkr_port,
+                e,
+            )
+            return False
+
+    async def connect(self, timeout: float = 10.0) -> None:
+        """Establish connections to trading and data gateways."""
+        await asyncio.gather(
+            self._try_connect_data(timeout=timeout),
+            self._try_connect_trading(timeout=timeout),
+            return_exceptions=True,
+        )
         self._connected = True
+        self.refresh_account()
+
+    async def connect_loop(self, interval: float = 5.0) -> None:
+        """Background loop continuously keeping both paper and real/data clients connected.
+
+        Similar to ibkr_portfolio's connect_loop:
+        - Reconnects real/data client if disconnected.
+        - Reconnects paper client if disconnected.
+        - Automatically refreshes account subscriptions on reconnection.
+        """
+        while self._monitor_running:
+            try:
+                # 1. Keep Real/Data Gateway online
+                if not self.data_ib.isConnected():
+                    await self._try_connect_data(timeout=5.0)
+
+                # 2. Keep Paper Trading Gateway online
+                if not self.trading_ib.isConnected():
+                    await self._try_connect_trading(timeout=5.0)
+
+            except Exception as e:
+                logger.debug("Error in IBKR connection monitor loop: %s", e)
+
+            await asyncio.sleep(interval)
+
+    def start_connection_monitor(self) -> None:
+        """Start the background keep-alive monitoring loop."""
+        if self._monitor_task is not None and not self._monitor_task.done():
+            return
+        self._monitor_running = True
+        try:
+            loop = asyncio.get_running_loop()
+            self._monitor_task = loop.create_task(self.connect_loop())
+            logger.info("IBKR connection keep-alive monitor started.")
+        except RuntimeError:
+            logger.debug(
+                "No running event loop; connection monitor deferred until loop is available."
+            )
+
+    def stop_connection_monitor(self) -> None:
+        """Stop the background keep-alive monitoring loop."""
+        self._monitor_running = False
+        if self._monitor_task is not None:
+            self._monitor_task.cancel()
+            self._monitor_task = None
+            logger.info("IBKR connection keep-alive monitor stopped.")
 
     async def disconnect(self) -> None:
         """Disconnect all active IBKR sessions."""
+        self.stop_connection_monitor()
         self._connected = False
         try:
-            if self.data_ib is not self.trading_ib and self.data_ib.isConnected():
+            if self.data_ib.isConnected():
                 self.data_ib.disconnect()
         except Exception as e:
             logger.debug("Error disconnecting data session: %s", e)
@@ -329,10 +488,11 @@ class IBKRClient:
 
     def cached_cash_summary(self) -> Optional[AccountCashSummary]:
         """Return the most recent cached cash summary or quick in-memory parse."""
-        if not self.trading_ib.isConnected():
+        active = self.active_trading_ib
+        if not active.isConnected():
             return self._last_cash_summary
         account = self.account
-        av = self.trading_ib.accountValues(account)
+        av = active.accountValues(account)
         if av:
             self._last_cash_summary = self._parse_account_values(av)
         return self._last_cash_summary
@@ -345,21 +505,22 @@ class IBKRClient:
         2. Aggregation of multi-currency forex cash balances into Total Cash.
         3. Conversion of Total Cash to USD at IBKR exchange rates if base currency is not USD.
         """
-        if not self.trading_ib.isConnected():
+        active = self.active_trading_ib
+        if not active.isConnected():
             return AccountCashSummary()
 
         account = self.account
-        av = self.trading_ib.accountValues(account)
+        av = active.accountValues(account)
         if not av:
             try:
-                await self.trading_ib.reqAccountUpdatesAsync(account)
-                av = self.trading_ib.accountValues(account)
+                await active.reqAccountUpdatesAsync(account)
+                av = active.accountValues(account)
             except Exception as e:
                 logger.debug("reqAccountUpdatesAsync failed for %s: %s", account, e)
 
         if not av:
             try:
-                summary = await self.trading_ib.accountSummaryAsync(account)
+                summary = await active.accountSummaryAsync(account)
                 av = summary
             except Exception as e:
                 logger.debug("accountSummaryAsync failed for %s: %s", account, e)
