@@ -1,10 +1,12 @@
 "use client";
 
 import { Fragment, useState } from "react";
-import useSWR from "swr";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import useSWR, { useSWRConfig } from "swr";
+import { ChevronDown, ChevronUp, RefreshCw } from "lucide-react";
+import { toast } from "sonner";
 
-import { fetcher, Trade, fmtMoney0, fmtMoneySigned } from "@/lib/api";
+import { fetcher, Trade, fmtMoney0, fmtMoneySigned, syncPnl } from "@/lib/api";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -27,8 +29,10 @@ import { cn } from "@/lib/utils";
 const POLL = { refreshInterval: 8000 };
 
 export default function Positions() {
+  const { mutate } = useSWRConfig();
   const [tab, setTab] = useState("open");
   const [expanded, setExpanded] = useState<number | null>(null);
+  const [syncing, setSyncing] = useState(false);
 
   const open = useSWR<Trade[]>("/api/positions", fetcher, POLL);
   const closed = useSWR<Trade[]>("/api/trades/closed", fetcher, POLL);
@@ -39,12 +43,40 @@ export default function Positions() {
   const closedPg = usePagination(closedList, 8);
   const toggle = (id: number) => setExpanded(expanded === id ? null : id);
 
+  const handleSync = async () => {
+    setSyncing(true);
+    try {
+      const res = await syncPnl();
+      mutate("/api/positions");
+      mutate("/api/pnl");
+      mutate("/api/trades");
+      toast.success("Marks synced from IBKR", {
+        description: `${res.marks_updated} position(s) updated · Unrealized: ${fmtMoneySigned(res.unrealized_pnl)}`,
+      });
+    } catch {
+      toast.error("Could not sync marks with IBKR");
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   if (open.error) return <ErrorNote msg="Could not load positions." />;
   if (!open.data || !closed.data) return <Loading />;
 
   return (
     <div className="max-w-[1080px]">
-      <PageHeader title="Positions" />
+      <PageHeader title="Positions">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleSync}
+          disabled={syncing}
+          className="gap-1.5 text-xs font-medium"
+        >
+          <RefreshCw className={cn("size-3.5", syncing && "animate-spin")} />
+          {syncing ? "Syncing…" : "Sync Marks"}
+        </Button>
+      </PageHeader>
       <Tabs value={tab} onValueChange={(v) => { setTab(v); setExpanded(null); }} className="mb-[18px]">
         <TabsList>
           <TabsTrigger value="open">Open · {openList.length}</TabsTrigger>

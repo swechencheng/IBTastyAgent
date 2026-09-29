@@ -199,6 +199,20 @@ export async function putSettings(body: SettingsUpdate): Promise<Settings> {
   return r.json();
 }
 
+export interface PnlSyncResult {
+  reconciled: number;
+  marks_updated: number;
+  unrealized_pnl: number;
+  realized_pnl: number;
+  error?: string;
+}
+
+export async function syncPnl(): Promise<PnlSyncResult> {
+  const r = await fetch(`${getApiBase()}/api/pnl/sync`, { method: "POST" });
+  if (!r.ok) throw new Error(`POST /api/pnl/sync: ${r.status}`);
+  return r.json();
+}
+
 // ---- Activity -------------------------------------------------------------
 export interface ActivityTrade {
   symbol: string;

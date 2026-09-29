@@ -161,3 +161,31 @@ def test_status_with_client_connection():
     r_conn = client.get("/api/connection")
     assert r_conn.status_code == 200
     assert r_conn.json()["status"] == "connected"
+
+
+def test_pnl_sync_endpoint():
+    from unittest.mock import MagicMock
+
+    sf = shared_factory()
+    seed_open_and_closed(sf)
+    mock_client = MagicMock()
+    mock_ib = MagicMock()
+    mock_ib.isConnected.return_value = True
+    mock_ib.trades.return_value = []
+    mock_ib.positions.return_value = []
+    mock_ib.portfolio.return_value = []
+    mock_client.active_trading_ib = mock_ib
+    mock_client.data_ib = mock_ib
+
+    app = create_app(
+        sf,
+        Runtime(mode=TradingMode.SANDBOX, starting_capital=1_000_000),
+        client=mock_client,
+    )
+    client = TestClient(app)
+    r = client.post("/api/pnl/sync")
+    assert r.status_code == 200
+    data = r.json()
+    assert "reconciled" in data
+    assert "marks_updated" in data
+    assert "unrealized_pnl" in data

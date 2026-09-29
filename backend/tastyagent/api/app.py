@@ -220,6 +220,23 @@ def create_app(
             starting_capital=rt.starting_capital,
         )
 
+    @app.post("/api/pnl/sync")
+    async def pnl_sync(
+        s: Session = Depends(get_session), rt: Runtime = Depends(get_runtime)
+    ) -> dict:
+        """Trigger an immediate reconciliation of fills and mark update from IBKR."""
+        if app.state.client is None:
+            raise HTTPException(503, "no broker client configured on this server")
+        from ..execution.tracker import sync_positions_and_marks
+        from ..runner import _live_mark
+
+        return await sync_positions_and_marks(
+            client=app.state.client,
+            session=s,
+            runtime=rt,
+            live_mark_fn=_live_mark,
+        )
+
     @app.get("/api/benchmark", response_model=BenchmarkOut)
     def benchmark(s: Session = Depends(get_session)) -> BenchmarkOut:
         snaps = list(s.scalars(select(EquitySnapshot).order_by(EquitySnapshot.ts)))
@@ -328,6 +345,53 @@ def create_app(
             app.state.last_cycle_time = time_mod.time()
             sess.close()
 
+    PNL_POLL_INTERVAL_SECONDS = 300.0  # 5 minutes
+
+    async def _pnl_poll_loop(interval: float = PNL_POLL_INTERVAL_SECONDS) -> None:
+        """Background loop: polls and updates position marks & PnL every 5 minutes during market hours."""
+        logger = logging.getLogger("tastyagent.api")
+        logger.info(
+            "Starting PnL & Position mark polling loop (interval=%ds)...",
+            int(interval),
+        )
+        from ..execution.tracker import sync_positions_and_marks
+        from ..runner import _live_mark
+        from ..scheduler import is_market_open
+
+        # Allow initial gateway connections to complete
+        await asyncio.sleep(3.0)
+
+        while getattr(app.state, "pnl_poll_running", True):
+            try:
+                client = getattr(app.state, "client", None)
+                if (
+                    client is not None
+                    and getattr(client, "active_trading_ib", None)
+                    and client.active_trading_ib.isConnected()
+                ):
+                    initial_synced = getattr(app.state, "initial_pnl_synced", False)
+                    if is_market_open() or not initial_synced:
+                        sess = session_factory()
+                        try:
+                            await sync_positions_and_marks(
+                                client=client,
+                                session=sess,
+                                runtime=getattr(app.state, "runtime", None),
+                                live_mark_fn=_live_mark,
+                            )
+                            app.state.initial_pnl_synced = True
+                        finally:
+                            sess.close()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("Error in PnL polling loop: %s", e)
+
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                break
+
     @app.on_event("startup")
     async def _on_startup() -> None:
         if app.state.client is not None and hasattr(app.state.client, "connect"):
@@ -339,6 +403,11 @@ def create_app(
                 )
             if hasattr(app.state.client, "start_connection_monitor"):
                 app.state.client.start_connection_monitor()
+
+        # Start 5-minute position mark & PnL polling loop
+        app.state.pnl_poll_running = True
+        app.state.pnl_poll_task = asyncio.create_task(_pnl_poll_loop())
+
         auto_start = os.environ.get(
             "TASTYAGENT_AUTO_START_SCHEDULER", "false"
         ).lower() in ("1", "true", "yes") or getattr(
@@ -369,6 +438,9 @@ def create_app(
 
     @app.on_event("shutdown")
     async def _on_shutdown() -> None:
+        app.state.pnl_poll_running = False
+        if getattr(app.state, "pnl_poll_task", None) is not None:
+            app.state.pnl_poll_task.cancel()
         if app.state.scheduler_stop is not None:
             app.state.scheduler_stop.set()
         if getattr(app.state, "scheduler_wake", None) is not None:

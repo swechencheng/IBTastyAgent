@@ -74,17 +74,57 @@ async def _qualify_trade_leg(client: IBKRClient, symbol: str, leg: TradeLeg) -> 
 async def _live_mark(client: IBKRClient, trade: Trade) -> PositionMark:
     """Mark an open position using live quotes and Greeks from IBKR."""
     opts = [await _qualify_trade_leg(client, trade.symbol, leg) for leg in trade.legs]
-    snaps = await snapshot_options(client.data_ib, opts, timeout=6.0)
+
+    # Pre-build portfolio market price lookup for fallback
+    port_map: dict[tuple[str, str, float, str], float] = {}
+    for ib_session in (client.active_trading_ib, client.data_ib):
+        if ib_session and ib_session.isConnected():
+            for p in ib_session.portfolio():
+                c = getattr(p, "contract", None)
+                if c is not None and getattr(p, "marketPrice", None) is not None:
+                    sym = getattr(c, "symbol", "").upper()
+                    right = getattr(c, "right", "").upper()
+                    strike = round(float(getattr(c, "strike", 0.0)), 2)
+                    exp = str(
+                        getattr(c, "lastTradeDateOrContractMonth", "") or ""
+                    ).replace("-", "")
+                    port_map[(sym, right, strike, exp)] = float(p.marketPrice)
+
+    snaps = {}
+    try:
+        snaps = await snapshot_options(client.data_ib, opts, timeout=6.0)
+    except Exception as e:
+        logger.debug("snapshot_options failed in _live_mark: %s", e)
 
     total_cost_per_share = 0.0
     short_deltas: list[tuple[OptionType, float]] = []
 
     for leg, opt in zip(trade.legs, opts):
         snap = snaps.get(opt.conId)
-        if snap is None or snap.mid is None:
+        mid_price: float | None = None
+        if snap is not None and snap.mid is not None:
+            mid_price = float(snap.mid)
+        else:
+            right = "P" if leg.option_type.lower() == "put" else "C"
+            strike = round(float(leg.strike), 2)
+            exp = str(leg.expiration).replace("-", "")
+            key = (trade.symbol.upper(), right, strike, exp)
+            if key in port_map:
+                mid_price = port_map[key]
+
+        if mid_price is None:
             raise RuntimeError(f"Incomplete mark for {trade.symbol} leg {opt.conId}")
-        total_cost_per_share += float(snap.mid)
-        if "sell" in str(leg.action).lower() and snap.delta is not None:
+
+        if "sell" in str(leg.action).lower():
+            total_cost_per_share += mid_price
+        else:
+            total_cost_per_share -= mid_price
+
+        if (
+            snap is not None
+            and "sell" in str(leg.action).lower()
+            and snap.delta is not None
+        ):
             short_deltas.append((OptionType(leg.option_type), abs(snap.delta)))
 
     tested_side = max_short_delta = None
@@ -92,7 +132,7 @@ async def _live_mark(client: IBKRClient, trade: Trade) -> PositionMark:
         tested_side, max_short_delta = max(short_deltas, key=lambda x: x[1])
 
     return PositionMark(
-        cost_to_close=round(total_cost_per_share * 100 * trade.contracts, 2),
+        cost_to_close=max(0.0, round(total_cost_per_share * 100 * trade.contracts, 2)),
         max_short_delta=max_short_delta,
         tested_side=tested_side,
     )

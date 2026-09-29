@@ -1,7 +1,8 @@
 "use client";
 
+import { useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
-import { Bell, TrendingUp, ArrowRight } from "lucide-react";
+import { Bell, TrendingUp, ArrowRight, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -16,6 +17,7 @@ import {
   fmtMoney0,
   fmtMoneySigned,
   fmtPctSigned,
+  syncPnl,
 } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -33,6 +35,7 @@ function formatActivityTime(iso: string) {
 
 export default function Overview({ goTo }: { goTo: (r: string) => void }) {
   const { mutate } = useSWRConfig();
+  const [syncing, setSyncing] = useState(false);
   const pnl = useSWR<Pnl>("/api/pnl", fetcher, POLL);
   const benchmark = useSWR<Benchmark>("/api/benchmark", fetcher, POLL);
   const approvals = useSWR<Trade[]>("/api/approvals", fetcher, POLL);
@@ -41,7 +44,22 @@ export default function Overview({ goTo }: { goTo: (r: string) => void }) {
   const settings = useSWR<Settings>("/api/settings", fetcher, POLL);
 
   const refresh = () =>
-    ["/api/pnl", "/api/approvals", "/api/positions", "/api/activity", "/api/status"].forEach((k) => mutate(k));
+    ["/api/pnl", "/api/approvals", "/api/positions", "/api/activity", "/api/status", "/api/benchmark"].forEach((k) => mutate(k));
+
+  const handleSync = async () => {
+    setSyncing(true);
+    try {
+      const res = await syncPnl();
+      refresh();
+      toast.success("Marks synced from IBKR", {
+        description: `${res.marks_updated} position(s) updated · Unrealized: ${fmtMoneySigned(res.unrealized_pnl)}`,
+      });
+    } catch {
+      toast.error("Could not sync marks with IBKR");
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   if (pnl.error) return <ErrorNote msg="Could not reach the API. Is the backend running on :8000?" />;
   if (!pnl.data) return <Loading />;
@@ -79,7 +97,18 @@ export default function Overview({ goTo }: { goTo: (r: string) => void }) {
 
   return (
     <div className="max-w-[1080px]">
-      <PageHeader title="Overview" />
+      <PageHeader title="Overview">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleSync}
+          disabled={syncing}
+          className="gap-1.5 text-xs font-medium"
+        >
+          <RefreshCw className={cn("size-3.5", syncing && "animate-spin")} />
+          {syncing ? "Syncing…" : "Sync Marks"}
+        </Button>
+      </PageHeader>
 
       <div className="mb-[18px] grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-6 sm:gap-3.5">
         <Kpi label="Total P/L" value={fmtMoneySigned(p.total_pnl)} delta={fmtPctSigned(p.profit_pct)} deltaTone={p.total_pnl >= 0 ? "up" : "down"} />
