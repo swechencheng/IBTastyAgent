@@ -10,7 +10,7 @@ import { cn, parseUtcDate } from "@/lib/utils";
 
 const KIND_LABEL: Record<string, string> = {
   working: "Order working",
-  open: "Filled — position open",
+  open: "Filled",
   rolled: "Rolled",
   managed: "Managed",
   closed: "Closed",
@@ -19,27 +19,27 @@ const KIND_LABEL: Record<string, string> = {
   planned: "Planned",
 };
 
-// Dot color per lifecycle kind (mirrors the position timeline).
-const KIND_DOT: Record<string, string> = {
-  planned: "bg-text-faint",
-  working: "bg-info",
-  open: "bg-gain",
-  managed: "bg-warn",
-  rolled: "bg-warn",
-  closed: "bg-muted-foreground",
-  canceled: "bg-loss",
-  rejected: "bg-loss",
+const KIND_BADGE: Record<string, string> = {
+  planned: "bg-surface-3 text-muted-foreground border-border",
+  working: "bg-info/10 text-info border-info/20",
+  open: "bg-gain/10 text-gain border-gain/20",
+  managed: "bg-warn/10 text-warn border-warn/20",
+  rolled: "bg-warn/10 text-warn border-warn/20",
+  closed: "bg-surface-3 text-muted-foreground border-border",
+  canceled: "bg-loss/10 text-loss/80 border-loss/20",
+  rejected: "bg-loss/10 text-loss/80 border-loss/20",
 };
 
 // Which lifecycle events are worth surfacing to the user.
 const NOTIFY = new Set(["working", "open", "rolled", "managed", "closed", "canceled", "rejected"]);
 
 const MAX_HISTORY = 60;
+const STORAGE_KEY = "tastyagent_last_read_event_id";
 
 function fireToast(e: EventFeedItem) {
   const label = KIND_LABEL[e.kind] ?? e.kind;
   const title = `${e.symbol} · ${label}`;
-  const opts = { description: e.detail, duration: 6000 };
+  const opts = { description: e.detail, duration: 3500 };
 
   if (e.kind === "open") toast.success(title, opts);
   else if (e.kind === "rejected" || e.kind === "canceled") toast.error(title, opts);
@@ -73,17 +73,38 @@ function relTime(iso: string): string {
 
 /**
  * Status-bar notification bell: polls `/api/events`, fires toast + desktop
- * notifications for new lifecycle events, and keeps a scrollable history so the
- * user can review anything they missed. The unread badge clears when opened.
+ * notifications for new live lifecycle events, and keeps a scrollable history.
+ * Tracks last-read event ID in localStorage so unread states and badges clear permanently once read.
  */
 export default function NotificationBell() {
   const [events, setEvents] = useState<EventFeedItem[]>([]);
-  const [unread, setUnread] = useState(0);
+  const [lastReadId, setLastReadId] = useState<number>(() => {
+    if (typeof window === "undefined") return 0;
+    const v = localStorage.getItem(STORAGE_KEY);
+    return v !== null ? Number(v) : -1; // -1 indicates fresh browser session
+  });
   const [open, setOpen] = useState(false);
 
   const lastId = useRef(0);
   const seeded = useRef(false);
   const openRef = useRef(false);
+  const lastReadIdRef = useRef(lastReadId);
+  lastReadIdRef.current = lastReadId;
+
+  // Unread count: items with id > lastReadId (if fresh browser session, 0 unread on first load)
+  const unreadCount =
+    lastReadId === -1
+      ? 0
+      : events.filter((e) => e.id > lastReadId).length;
+
+  const markAllAsRead = () => {
+    if (!events.length) return;
+    const maxId = Math.max(...events.map((e) => e.id), lastReadId);
+    setLastReadId(maxId);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(STORAGE_KEY, String(maxId));
+    }
+  };
 
   useEffect(() => {
     if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "default") {
@@ -93,7 +114,8 @@ export default function NotificationBell() {
     let alive = true;
     const poll = async () => {
       try {
-        const r = await fetch(`${API_BASE}/api/events?after=${lastId.current}&limit=50`);
+        const afterParam = seeded.current ? lastId.current : 0;
+        const r = await fetch(`${API_BASE}/api/events?after=${afterParam}&limit=50`);
         if (!r.ok) return;
         const items: EventFeedItem[] = await r.json();
         if (!items.length) return;
@@ -101,19 +123,58 @@ export default function NotificationBell() {
         const notable = items.filter((e) => NOTIFY.has(e.kind));
 
         if (!seeded.current) {
-          // First run: seed recent history (so the bell isn't empty) but don't
-          // replay toasts or count these as unread — they already happened.
+          // First run: seed recent history into dropdown, but NEVER replay historical toasts.
           seeded.current = true;
           lastId.current = maxId;
           setEvents(notable.slice(-MAX_HISTORY).reverse());
+
+          // If fresh session (no prior lastReadId in localStorage), mark existing history as read
+          if (lastReadIdRef.current === -1) {
+            setLastReadId(maxId);
+            if (typeof window !== "undefined") {
+              localStorage.setItem(STORAGE_KEY, String(maxId));
+            }
+          }
           return;
         }
 
         if (notable.length) {
-          for (const e of notable) fireToast(e);
-          setEvents((prev) => [...notable.slice().reverse(), ...prev].slice(0, MAX_HISTORY));
-          // Don't accrue unread while the panel is open — the user is reading it.
-          if (!openRef.current) setUnread((n) => n + notable.length);
+          // Only fire toasts for fresh live events (occurred within the last 60s)
+          const now = Date.now();
+          const freshEvents = notable.filter((e) => {
+            const t = parseUtcDate(e.ts).getTime();
+            return !isNaN(t) && now - t <= 60000;
+          });
+
+          // Rate-limit toasts: max 2 individual + 1 summary
+          if (freshEvents.length > 0) {
+            const toToast = freshEvents.slice(0, 2);
+            for (const e of toToast) fireToast(e);
+            if (freshEvents.length > 2) {
+              toast.info(`+${freshEvents.length - 2} more trade events`, { duration: 3500 });
+            }
+          }
+
+          setEvents((prev) => {
+            const next = [...notable.slice().reverse(), ...prev];
+            const seen = new Set<number>();
+            const deduped: EventFeedItem[] = [];
+            for (const ev of next) {
+              if (!seen.has(ev.id)) {
+                seen.add(ev.id);
+                deduped.push(ev);
+              }
+            }
+            return deduped.slice(0, MAX_HISTORY);
+          });
+
+          // If dropdown is currently open, automatically advance read pointer
+          if (openRef.current) {
+            setLastReadId(maxId);
+            if (typeof window !== "undefined") {
+              localStorage.setItem(STORAGE_KEY, String(maxId));
+            }
+          }
         }
         lastId.current = maxId;
       } catch {
@@ -134,34 +195,51 @@ export default function NotificationBell() {
   const onOpenChange = (next: boolean) => {
     setOpen(next);
     openRef.current = next;
-    if (next) setUnread(0);
+    if (next) {
+      markAllAsRead();
+    }
   };
 
   return (
     <DropdownMenu open={open} onOpenChange={onOpenChange}>
       <DropdownMenuTrigger asChild>
         <button
-          aria-label={`Notifications${unread > 0 ? ` (${unread} unread)` : ""}`}
+          aria-label={`Notifications${unreadCount > 0 ? ` (${unreadCount} unread)` : ""}`}
           className="relative inline-flex size-9 items-center justify-center rounded-lg border border-border bg-surface-2 text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground"
         >
           <Bell className="size-[17px]" />
-          {unread > 0 && (
-            <span className="absolute -right-1.5 -top-1.5 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-brand px-1 text-[10px] font-bold leading-none text-white">
-              {unread > 99 ? "99+" : unread}
+          {unreadCount > 0 && (
+            <span className="absolute -right-1.5 -top-1.5 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-brand px-1 text-[10px] font-bold leading-none text-white shadow-sm animate-in fade-in zoom-in">
+              {unreadCount > 99 ? "99+" : unreadCount}
             </span>
           )}
         </button>
       </DropdownMenuTrigger>
 
-      <DropdownMenuContent align="end" className="w-[340px] p-0">
+      <DropdownMenuContent align="end" className="w-[350px] p-0 shadow-xl">
         <div className="flex items-center justify-between border-b border-border px-3.5 py-2.5">
-          <span className="text-[13px] font-semibold">Notifications</span>
-          {events.length > 0 && (
-            <span className="inline-flex items-center gap-1 text-[11px] text-text-faint">
+          <div className="flex items-center gap-2">
+            <span className="text-[13px] font-semibold">Notifications</span>
+            {unreadCount > 0 && (
+              <span className="rounded-full bg-brand/10 text-brand px-2 py-0.5 text-[10px] font-bold">
+                {unreadCount} new
+              </span>
+            )}
+          </div>
+          {unreadCount > 0 ? (
+            <button
+              onClick={markAllAsRead}
+              className="inline-flex items-center gap-1 text-[11px] font-medium text-brand hover:underline"
+            >
               <CheckCheck className="size-3.5" />
+              Mark all read
+            </button>
+          ) : events.length > 0 ? (
+            <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/80">
+              <CheckCheck className="size-3.5 text-gain" />
               Caught up
             </span>
-          )}
+          ) : null}
         </div>
 
         <div className="max-h-[400px] overflow-y-auto">
@@ -170,27 +248,52 @@ export default function NotificationBell() {
               No notifications yet.
             </div>
           ) : (
-            events.map((e) => (
-              <div
-                key={e.id}
-                className="flex gap-3 border-b border-border/50 px-3.5 py-2.5 last:border-b-0"
-              >
-                <span className={cn("mt-1.5 size-2 shrink-0 rounded-full", KIND_DOT[e.kind] || "bg-text-faint")} />
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-baseline justify-between gap-2">
-                    <span className="truncate text-[13px] font-medium">
-                      {e.symbol} — {KIND_LABEL[e.kind] ?? e.kind}
-                    </span>
-                    <span className="shrink-0 font-mono text-[10px] tabular-nums text-text-faint">
-                      {relTime(e.ts)}
-                    </span>
-                  </div>
-                  {e.detail && (
-                    <div className="mt-0.5 truncate text-[12px] text-muted-foreground">{e.detail}</div>
+            events.map((e) => {
+              const isUnread = lastReadId !== -1 && e.id > lastReadId;
+              return (
+                <div
+                  key={e.id}
+                  className={cn(
+                    "flex items-start gap-2.5 border-b border-border/40 px-3.5 py-2.5 transition-colors last:border-b-0",
+                    isUnread ? "bg-surface-2/70" : "hover:bg-surface-2/30"
                   )}
+                >
+                  <div className="mt-1.5 flex w-2 shrink-0 justify-center">
+                    {isUnread ? (
+                      <span className="size-2 rounded-full bg-brand" title="Unread" />
+                    ) : (
+                      <span className="size-1 rounded-full bg-transparent" />
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 truncate">
+                        <span className="truncate text-[13px] font-semibold text-foreground">
+                          {e.symbol}
+                        </span>
+                        <span className="text-muted-foreground/40 text-xs">·</span>
+                        <span
+                          className={cn(
+                            "rounded border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider",
+                            KIND_BADGE[e.kind] || "bg-surface-3 text-muted-foreground border-border"
+                          )}
+                        >
+                          {KIND_LABEL[e.kind] ?? e.kind}
+                        </span>
+                      </div>
+                      <span className="shrink-0 font-mono text-[10px] tabular-nums text-text-faint">
+                        {relTime(e.ts)}
+                      </span>
+                    </div>
+                    {e.detail && (
+                      <div className="mt-1 text-[12px] leading-relaxed text-muted-foreground line-clamp-2">
+                        {e.detail}
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       </DropdownMenuContent>

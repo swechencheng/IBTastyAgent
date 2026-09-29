@@ -8,8 +8,10 @@ const Toaster = ({ ...props }: ToasterProps) => {
   return (
     <Sonner
       theme="dark"
-      position="bottom-right"
+      position="top-right"
       richColors
+      closeButton
+      duration={3500}
       toastOptions={{
         classNames: {
           // richColors handles per-type backgrounds/borders/icons; keep shared shape here.

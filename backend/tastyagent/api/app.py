@@ -711,14 +711,19 @@ def create_app(
     def events(
         after: int = 0, limit: int = 50, s: Session = Depends(get_session)
     ) -> list[EventFeedItem]:
-        rows = list(
-            s.scalars(
-                select(TradeEvent)
-                .where(TradeEvent.id > after)
-                .order_by(TradeEvent.id)
-                .limit(limit)
+        if after == 0:
+            # Seed request: fetch latest `limit` events in chronological order
+            subq = select(TradeEvent).order_by(TradeEvent.id.desc()).limit(limit)
+            rows = list(reversed(list(s.scalars(subq))))
+        else:
+            rows = list(
+                s.scalars(
+                    select(TradeEvent)
+                    .where(TradeEvent.id > after)
+                    .order_by(TradeEvent.id)
+                    .limit(limit)
+                )
             )
-        )
         out: list[EventFeedItem] = []
         for e in rows:
             t = e.trade
