@@ -221,13 +221,35 @@ async def sync_positions_and_marks(
     # 5. Persist equity snapshot so frontend equity curve is up to date
     summary = summarize(ledger.all_trades())
     if runtime is not None:
+        import asyncio
+        from sqlalchemy import select
+        from ..portfolio.benchmark import latest_sp500_close
+
+        sp_close: float | None = None
+        try:
+            sp_close = await asyncio.to_thread(latest_sp500_close)
+        except Exception as e:
+            logger.debug(
+                "Failed to fetch latest S&P close in sync_positions_and_marks: %s", e
+            )
+
+        if sp_close is None:
+            last_snap = session.scalars(
+                select(EquitySnapshot)
+                .where(EquitySnapshot.sp500_close.is_not(None))
+                .order_by(EquitySnapshot.ts.desc())
+                .limit(1)
+            ).first()
+            if last_snap is not None:
+                sp_close = last_snap.sp500_close
+
         base_cap = getattr(runtime, "starting_capital", 10000.0)
         session.add(
             EquitySnapshot(
                 net_liq=base_cap + summary.realized_pnl + summary.unrealized_pnl,
                 realized_pnl_cum=summary.realized_pnl,
                 unrealized_pnl=summary.unrealized_pnl,
-                sp500_close=None,
+                sp500_close=sp_close,
             )
         )
         session.commit()

@@ -240,18 +240,46 @@ def create_app(
     @app.get("/api/benchmark", response_model=BenchmarkOut)
     def benchmark(s: Session = Depends(get_session)) -> BenchmarkOut:
         snaps = list(s.scalars(select(EquitySnapshot).order_by(EquitySnapshot.ts)))
-        equity_curve = [(snap.ts.date(), snap.net_liq) for snap in snaps]
-        sp_curve: list[tuple[date, float]] = [
-            (snap.ts.date(), snap.sp500_close)
-            for snap in snaps
-            if snap.sp500_close is not None
-        ]
-        # If we didn't persist S&P alongside snapshots, try a live fetch for the range.
+        if not snaps:
+            return BenchmarkOut(
+                strategy_return_pct=0.0,
+                sp500_return_pct=0.0,
+                outperformance_pct=0.0,
+                strategy_curve=[],
+                sp500_curve=[],
+            )
+
+        # 1. Forward-fill known S&P 500 closes across snapshots
+        last_sp: float | None = None
+        sp_values: list[float | None] = []
+        for snap in snaps:
+            if snap.sp500_close is not None:
+                last_sp = snap.sp500_close
+            sp_values.append(last_sp)
+
+        # 2. Backward-fill any initial snapshots before the first recorded S&P close
+        first_known = next((v for v in sp_values if v is not None), None)
+        if first_known is None:
+            try:
+                first_known = bench.latest_sp500_close()
+            except Exception:
+                first_known = None
+
+        equity_curve: list[tuple[date, float]] = []
+        sp_curve: list[tuple[date, float]] = []
+        for snap, sp_val in zip(snaps, sp_values):
+            val = sp_val if sp_val is not None else first_known
+            equity_curve.append((snap.ts.date(), snap.net_liq))
+            if val is not None:
+                sp_curve.append((snap.ts.date(), val))
+
+        # Fallback if no S&P data existed at all
         if equity_curve and not sp_curve:
             try:
                 sp_curve = bench.fetch_sp500_closes(equity_curve[0][0], date.today())
-            except Exception:  # noqa: BLE001 - benchmark is best-effort
+            except Exception:
                 sp_curve = []
+
         cmp = bench.compare(equity_curve, sp_curve)
         return BenchmarkOut(
             strategy_return_pct=cmp.strategy_return_pct,
