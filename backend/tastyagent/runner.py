@@ -72,7 +72,13 @@ async def _qualify_trade_leg(client: IBKRClient, symbol: str, leg: TradeLeg) -> 
 
 
 async def _live_mark(client: IBKRClient, trade: Trade) -> PositionMark:
-    """Mark an open position using live quotes and Greeks from IBKR."""
+    """Mark an open position using live quotes and Greeks from IBKR.
+
+    Prioritizes IBKR's broker portfolio valuation (`marketPrice`) across all legs,
+    matching `calculate_marks_from_portfolio`. Live options snapshots are gathered
+    primarily to observe current Greeks (`delta`) and act as a fallback when legs
+    are not found in the broker portfolio.
+    """
     opts = [await _qualify_trade_leg(client, trade.symbol, leg) for leg in trade.legs]
 
     # Pre-build portfolio market price lookup for fallback
@@ -81,7 +87,11 @@ async def _live_mark(client: IBKRClient, trade: Trade) -> PositionMark:
         if ib_session and ib_session.isConnected():
             for p in ib_session.portfolio():
                 c = getattr(p, "contract", None)
-                if c is not None and getattr(p, "marketPrice", None) is not None:
+                if (
+                    c is not None
+                    and getattr(p, "marketPrice", None) is not None
+                    and float(p.marketPrice) >= 0.0
+                ):
                     sym = getattr(c, "symbol", "").upper()
                     right = getattr(c, "right", "").upper()
                     strike = round(float(getattr(c, "strike", 0.0)), 2)
@@ -90,35 +100,55 @@ async def _live_mark(client: IBKRClient, trade: Trade) -> PositionMark:
                     ).replace("-", "")
                     port_map[(sym, right, strike, exp)] = float(p.marketPrice)
 
+    # Check if all legs are available in the broker portfolio
+    all_legs_in_port = True
+    port_cost_per_share = 0.0
+    for leg in trade.legs:
+        right = "P" if leg.option_type.lower() == "put" else "C"
+        strike = round(float(leg.strike), 2)
+        exp = str(leg.expiration).replace("-", "")
+        key = (trade.symbol.upper(), right, strike, exp)
+        if key in port_map:
+            mkt_price = port_map[key]
+            if "sell" in str(leg.action).lower():
+                port_cost_per_share += mkt_price
+            else:
+                port_cost_per_share -= mkt_price
+        else:
+            all_legs_in_port = False
+            break
+
     snaps = {}
     try:
         snaps = await snapshot_options(client.data_ib, opts, timeout=6.0)
     except Exception as e:
         logger.debug("snapshot_options failed in _live_mark: %s", e)
 
-    total_cost_per_share = 0.0
+    total_cost_per_share = port_cost_per_share if all_legs_in_port else 0.0
     short_deltas: list[tuple[OptionType, float]] = []
 
     for leg, opt in zip(trade.legs, opts):
         snap = snaps.get(opt.conId)
-        mid_price: float | None = None
-        if snap is not None and snap.mid is not None:
-            mid_price = float(snap.mid)
-        else:
+        if not all_legs_in_port:
+            mid_price: float | None = None
             right = "P" if leg.option_type.lower() == "put" else "C"
             strike = round(float(leg.strike), 2)
             exp = str(leg.expiration).replace("-", "")
             key = (trade.symbol.upper(), right, strike, exp)
             if key in port_map:
                 mid_price = port_map[key]
+            elif snap is not None and snap.mid is not None:
+                mid_price = float(snap.mid)
 
-        if mid_price is None:
-            raise RuntimeError(f"Incomplete mark for {trade.symbol} leg {opt.conId}")
+            if mid_price is None:
+                raise RuntimeError(
+                    f"Incomplete mark for {trade.symbol} leg {opt.conId}"
+                )
 
-        if "sell" in str(leg.action).lower():
-            total_cost_per_share += mid_price
-        else:
-            total_cost_per_share -= mid_price
+            if "sell" in str(leg.action).lower():
+                total_cost_per_share += mid_price
+            else:
+                total_cost_per_share -= mid_price
 
         if (
             snap is not None
@@ -328,31 +358,18 @@ async def run_one_cycle(
         result, decision
     )
 
-    # 7. Reconcile fills against active IBKR orders
+    # 7. Reconcile broker fills, synchronize marks, and persist canonical equity snapshot
     try:
-        open_trades = client.active_trading_ib.openTrades()
-        status_map = {str(t.order.orderId): t.orderStatus.status for t in open_trades}
-        reconcile_fills(ledger, status_map)
-    except Exception as e:
-        logger.debug("Fill reconciliation skipped: %s", e)
+        from .execution.tracker import sync_positions_and_marks
 
-    # 8. Equity snapshot
-    summary = summarize(ledger.all_trades())
-    sp_close = await asyncio.to_thread(latest_sp500_close)
-    base_cap = (
-        runtime.starting_capital
-        if getattr(runtime, "use_custom_working_capital", True)
-        else net_liq
-    )
-    session.add(
-        EquitySnapshot(
-            net_liq=base_cap + summary.realized_pnl + summary.unrealized_pnl,
-            realized_pnl_cum=summary.realized_pnl,
-            unrealized_pnl=summary.unrealized_pnl,
-            sp500_close=sp_close,
+        await sync_positions_and_marks(
+            client=client,
+            session=session,
+            runtime=runtime,
+            live_mark_fn=_live_mark,
         )
-    )
-    session.commit()
+    except Exception as e:
+        logger.warning("Post-cycle position & equity sync failed: %s", e)
 
     return {
         "considered": result.considered,

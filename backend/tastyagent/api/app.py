@@ -249,6 +249,25 @@ def create_app(
                 sp500_curve=[],
             )
 
+        # Filter out isolated transient single-point spikes (e.g. illiquid bid-ask dropouts)
+        clean_snaps: list[EquitySnapshot] = []
+        n_snaps = len(snaps)
+        for i, snap in enumerate(snaps):
+            if 0 < i < n_snaps - 1:
+                prev_s = snaps[i - 1]
+                next_s = snaps[i + 1]
+                dt_total = (next_s.ts - prev_s.ts).total_seconds()
+                if dt_total <= 1200:  # within 20 minutes
+                    d1 = snap.net_liq - prev_s.net_liq
+                    d2 = next_s.net_liq - snap.net_liq
+                    if abs(d1) > 12.0 and abs(d2) > 12.0 and (d1 * d2 < 0):
+                        if abs(next_s.net_liq - prev_s.net_liq) <= 0.5 * max(
+                            abs(d1), abs(d2)
+                        ):
+                            continue
+            clean_snaps.append(snap)
+        snaps = clean_snaps
+
         # 1. Forward-fill known S&P 500 closes across snapshots
         last_sp: float | None = None
         sp_values: list[float | None] = []
