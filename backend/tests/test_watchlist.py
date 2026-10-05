@@ -55,6 +55,15 @@ def test_rank_universe_by_ivr_then_liquidity():
     assert rank_universe(m, top_n=2) == ["D", "A"]
 
 
+def test_rank_universe_fallback_when_no_ivr():
+    # If no symbols have valid IV rank, rank_universe should still backfill to prevent starving candidate generation
+    m = {
+        "SPY": IVMetrics("SPY", None, None, None, None, None),
+        "QQQ": IVMetrics("QQQ", None, None, None, None, None),
+    }
+    assert rank_universe(m, top_n=2) == ["SPY", "QQQ"]
+
+
 def _client():
     eng = create_engine(
         "sqlite://",

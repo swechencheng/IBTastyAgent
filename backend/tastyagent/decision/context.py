@@ -62,16 +62,28 @@ def rank_universe(metrics: dict[str, IVMetrics], top_n: int) -> list[str]:
         key=lambda m: (m.iv_rank, m.liquidity_rating or 0),
         reverse=True,
     )
-    return [m.symbol for m in ranked[:top_n]]
+    result = [m.symbol for m in ranked[:top_n]]
+    if len(result) < top_n:
+        seen = set(result)
+        for sym in metrics.keys():
+            if sym not in seen:
+                result.append(sym)
+                seen.add(sym)
+                if len(result) >= top_n:
+                    break
+    return result
 
 
 async def gather_context(
     metrics_session,
     params: StrategyParams,
     watchlist: list[str] | None = None,
+    max_retry_seconds: float = 300.0,
 ) -> tuple[dict[str, IVMetrics], dict]:
     """Fetch IV metrics for the watchlist and build the regime. Returns (metrics, regime)."""
     watchlist = watchlist or DEFAULT_WATCHLIST
-    metrics = await get_iv_metrics(metrics_session, watchlist)
+    metrics = await get_iv_metrics(
+        metrics_session, watchlist, max_retry_seconds=max_retry_seconds
+    )
     vix: float | None = None  # VIX index metrics are best-effort; left None for now
     return metrics, build_regime(metrics, params, vix)

@@ -311,7 +311,12 @@ async def _candidates_for_symbol(
     client: IBKRClient, params: StrategyParams, today: date, symbol: str, m
 ) -> list[CandidateTrade]:
     """Build feasible options strategies for one underlying using IBKR chain and Greeks."""
-    raw_exps, strikes = await get_option_chain_parameters(client.data_ib, symbol)
+    ib_session = (
+        client.data_ib
+        if (client.data_ib and client.data_ib.isConnected())
+        else client.active_trading_ib
+    )
+    raw_exps, strikes = await get_option_chain_parameters(ib_session, symbol)
     if not raw_exps or not strikes:
         return []
 
@@ -321,12 +326,14 @@ async def _candidates_for_symbol(
         return []
 
     exp_str = exp_date.strftime("%Y%m%d")
-    underlying = float(await get_underlying_price(client.data_ib, symbol))
+    underlying = float(await get_underlying_price(ib_session, symbol))
 
     # Fetch valid option contracts directly via reqContractDetailsAsync to avoid invalid strike errors
     pattern = Option(symbol, exp_str, right="", exchange="SMART")
     try:
-        cds = await client.data_ib.reqContractDetailsAsync(pattern)
+        cds = await asyncio.wait_for(
+            ib_session.reqContractDetailsAsync(pattern), timeout=8.0
+        )
         contracts = [cd.contract for cd in cds]
     except Exception as e:
         logger.debug(
@@ -342,8 +349,14 @@ async def _candidates_for_symbol(
             for s in eligible_strikes
             for r in ("P", "C")
         ]
-        await client.data_ib.qualifyContractsAsync(*contracts)
-        contracts = [c for c in contracts if c.conId > 0]
+        try:
+            await asyncio.wait_for(
+                ib_session.qualifyContractsAsync(*contracts), timeout=8.0
+            )
+            contracts = [c for c in contracts if c.conId > 0]
+        except Exception as e:
+            logger.debug("Failed to qualify fallback contracts for %s: %s", symbol, e)
+            contracts = []
 
     if not contracts:
         return []
@@ -352,14 +365,18 @@ async def _candidates_for_symbol(
     lo, hi = underlying * 0.75, underlying * 1.25
     relevant_contracts = [c for c in contracts if lo <= c.strike <= hi] or contracts
 
-    snaps = await snapshot_options(client.data_ib, relevant_contracts, timeout=8.0)
+    snaps = await snapshot_options(ib_session, relevant_contracts, timeout=8.0)
 
     puts = [c for c in relevant_contracts if c.right == "P"]
     calls = [c for c in relevant_contracts if c.right == "C"]
 
     dte = (exp_date - today).days
-    ivr = m.iv_rank or 0.0
-    earn = (m.next_earnings - today).days if getattr(m, "next_earnings", None) else None
+    ivr = (m.iv_rank or 0.0) if m else 0.0
+    earn = (
+        (m.next_earnings - today).days
+        if (m and getattr(m, "next_earnings", None))
+        else None
+    )
 
     p_short = select_by_delta(puts, snaps, params.target_short_delta)
     c_short = select_by_delta(calls, snaps, params.target_short_delta)
@@ -479,17 +496,25 @@ async def generate_candidates(
     """Scan watchlist: build feasible strategies concurrently via IBKR."""
     today = date.today()
     if metrics is None:
-        metrics = await get_iv_metrics(client.data_ib, watchlist)
+        ib_data = (
+            client.data_ib
+            if (client.data_ib and client.data_ib.isConnected())
+            else client.active_trading_ib
+        )
+        metrics = await get_iv_metrics(ib_data, watchlist)
+
+    # Prioritize symbols with known IV metrics, but never starve candidate generation
     eligible = [s for s in watchlist if (m := metrics.get(s)) and m.iv_rank is not None]
+    if not eligible:
+        eligible = [s for s in watchlist if s in (metrics or {})] or list(watchlist)
 
     sem = asyncio.Semaphore(concurrency)
 
     async def guarded(symbol: str) -> list[CandidateTrade]:
         async with sem:
             try:
-                return await _candidates_for_symbol(
-                    client, params, today, symbol, metrics[symbol]
-                )
+                m = metrics.get(symbol) if metrics else None
+                return await _candidates_for_symbol(client, params, today, symbol, m)
             except Exception as e:
                 logger.debug("Failed candidate generation for %s: %s", symbol, e)
                 return []

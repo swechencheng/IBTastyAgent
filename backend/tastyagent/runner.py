@@ -339,10 +339,29 @@ async def run_one_cycle(
     )
 
     # 4. Market Context (IV Rank for universe via IBKR 1-year historical IV + cache)
-    metrics, regime = await gather_context(client.data_ib, params, universe)
+    metrics_session = client.data_ib or client.active_trading_ib
+    scheduler_interval = float(getattr(runtime, "scheduler_interval_seconds", 300.0))
+    max_retry_seconds = min(300.0, scheduler_interval)
+    metrics, regime = await gather_context(
+        metrics_session,
+        params,
+        universe,
+        max_retry_seconds=max_retry_seconds,
+    )
     top_symbols = rank_universe(metrics, params.universe_top_n)
+    logger.info(
+        "Universe scan: %d symbols configured, %d top symbols selected by IV rank (%s)",
+        len(universe),
+        len(top_symbols),
+        ", ".join(top_symbols) if top_symbols else "none",
+    )
     candidates = await generate_candidates(
-        client, client.data_ib, params, top_symbols, metrics=metrics
+        client, metrics_session, params, top_symbols, metrics=metrics
+    )
+    logger.info(
+        "Candidate generation complete: %d candidate trades found across %d symbols",
+        len(candidates),
+        len(top_symbols),
     )
 
     # 5. Decision cycle (LLM / Guardrails)
