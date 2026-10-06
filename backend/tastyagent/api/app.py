@@ -749,33 +749,33 @@ def create_app(
                 select(Decision).order_by(Decision.created_at.desc()).limit(limit)
             )
         )
-        # "Managed" actions (exits/rolls) aren't linked to a decision, so bucket
-        # CLOSED trades into the cycle whose time window contains their close.
-        oldest = decisions[-1].created_at if decisions else None
-        closed: list[Trade] = []
-        if oldest is not None:
-            closed = list(
-                s.scalars(
-                    select(Trade)
-                    .where(
-                        Trade.status == TradeStatus.CLOSED, Trade.closed_at.is_not(None)
-                    )
-                    .where(Trade.closed_at >= oldest)
-                    .order_by(Trade.closed_at)
-                )
+        # "Managed" actions (exits/rolls) aren't linked directly to a decision foreign key,
+        # so bucket CLOSED trades into the cycle concluding at that decision.
+        closed: list[Trade] = list(
+            s.scalars(
+                select(Trade)
+                .where(Trade.status == TradeStatus.CLOSED, Trade.closed_at.is_not(None))
+                .order_by(Trade.closed_at)
             )
+        )
 
         items: list[ActivityItem] = []
         for i, d in enumerate(decisions):
-            newer_bound = decisions[i - 1].created_at if i > 0 else None
+            # A decision d_i represents the cycle concluding at d_i.created_at.
+            # Actions managed in this cycle occurred between the prior decision d_{i+1} and d_i
+            # (or for the newest decision i == 0, anything since d_{1}.created_at).
+            prior_d = decisions[i + 1] if i + 1 < len(decisions) else None
+            lower_bound = prior_d.created_at if prior_d is not None else None
+            upper_bound = None if i == 0 else d.created_at
+
             placed = [t for t in d.trades if t.status in PLACED_STATUSES]
             rejected = [t for t in d.trades if t.status is TradeStatus.REJECTED]
             managed = [
                 t
                 for t in closed
                 if t.closed_at is not None
-                and t.closed_at >= d.created_at
-                and (newer_bound is None or t.closed_at < newer_bound)
+                and (lower_bound is None or t.closed_at > lower_bound)
+                and (upper_bound is None or t.closed_at <= upper_bound)
             ]
 
             # Per-ticker reasoning bullets (structured, easy to follow).
