@@ -213,6 +213,23 @@ export async function syncPnl(): Promise<PnlSyncResult> {
   return r.json();
 }
 
+export interface ResetSandboxResult {
+  status: string;
+  message: string;
+  trades_deleted: number;
+  decisions_deleted: number;
+  orders_cancelled: number;
+}
+
+export async function resetSandbox(): Promise<ResetSandboxResult> {
+  const r = await fetch(`${getApiBase()}/api/sandbox/reset`, { method: "POST" });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.detail || `POST /api/sandbox/reset: ${r.status}`);
+  }
+  return r.json();
+}
+
 // ---- Activity -------------------------------------------------------------
 export interface ActivityTrade {
   symbol: string;

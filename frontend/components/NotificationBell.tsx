@@ -107,6 +107,20 @@ export default function NotificationBell() {
   };
 
   useEffect(() => {
+    const handleReset = () => {
+      setEvents([]);
+      setLastReadId(0);
+      lastId.current = 0;
+      seeded.current = false;
+      if (typeof window !== "undefined") {
+        localStorage.removeItem(STORAGE_KEY);
+      }
+    };
+    window.addEventListener("tastyagent:sandbox_reset", handleReset);
+    return () => window.removeEventListener("tastyagent:sandbox_reset", handleReset);
+  }, []);
+
+  useEffect(() => {
     if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "default") {
       Notification.requestPermission().catch(() => {});
     }
@@ -118,9 +132,27 @@ export default function NotificationBell() {
         const r = await fetch(`${API_BASE}/api/events?after=${afterParam}&limit=50`);
         if (!r.ok) return;
         const items: EventFeedItem[] = await r.json();
-        if (!items.length) return;
+        if (!items.length) {
+          if (afterParam === 0) {
+            setEvents([]);
+            lastId.current = 0;
+            seeded.current = true;
+          }
+          return;
+        }
         const maxId = items[items.length - 1].id;
         const notable = items.filter((e) => NOTIFY.has(e.kind));
+
+        // Detect backend database reset if IDs rolled back
+        if (lastId.current > 0 && maxId < lastId.current) {
+          lastId.current = maxId;
+          setEvents(notable.slice(-MAX_HISTORY).reverse());
+          setLastReadId(maxId);
+          if (typeof window !== "undefined") {
+            localStorage.setItem(STORAGE_KEY, String(maxId));
+          }
+          return;
+        }
 
         if (!seeded.current) {
           // First run: seed recent history into dropdown, but NEVER replay historical toasts.

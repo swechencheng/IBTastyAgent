@@ -16,7 +16,7 @@ from typing import Iterator
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..config import TradingMode
@@ -42,6 +42,7 @@ from .schemas import (
     PnLOut,
     RankedSymbol,
     ReasoningItem,
+    ResetSandboxOut,
     SchedulerConfig,
     SettingsOut,
     SettingsUpdate,
@@ -329,6 +330,104 @@ def create_app(
     ) -> StatusOut:
         rt.kill_switch = req.engaged
         return status(rt)
+
+    @app.post("/api/sandbox/reset", response_model=ResetSandboxOut)
+    async def reset_sandbox(
+        s: Session = Depends(get_session),
+        rt: Runtime = Depends(get_runtime),
+    ) -> ResetSandboxOut:
+        logger = logging.getLogger("tastyagent.api")
+        logger.info(
+            "Executing Sandbox Reset: wiping sandbox trades, decisions, events, and canceling broker orders..."
+        )
+
+        orders_cancelled = 0
+        client = getattr(app.state, "client", None)
+        if client and hasattr(client, "active_trading_ib") and client.active_trading_ib:
+            try:
+                active_ib = client.active_trading_ib
+                if active_ib.isConnected():
+                    open_trades = list(active_ib.openTrades())
+                    for ot in open_trades:
+                        ref = getattr(ot.order, "orderRef", "") or ""
+                        if ref.startswith("TastyAgent"):
+                            active_ib.cancelOrder(ot.order)
+                            orders_cancelled += 1
+                            logger.info(
+                                "Cancelled broker order #%s (%s)",
+                                ot.order.orderId,
+                                ref,
+                            )
+            except Exception as e:
+                logger.warning(
+                    "Failed to cancel open broker orders during sandbox reset: %s", e
+                )
+
+        # 1. Delete all sandbox trades (cascades to TradeLeg and TradeEvent)
+        sandbox_trades = list(s.scalars(select(Trade).where(Trade.mode == "sandbox")))
+        trades_count = len(sandbox_trades)
+        sandbox_trade_ids = [t.id for t in sandbox_trades]
+        for t in sandbox_trades:
+            s.delete(t)
+
+        # Explicitly purge any remaining trade_events linked to sandbox trades or orphaned
+        if sandbox_trade_ids:
+            s.execute(
+                delete(TradeEvent).where(TradeEvent.trade_id.in_(sandbox_trade_ids))
+            )
+        s.execute(
+            delete(TradeEvent).where(
+                ~TradeEvent.trade_id.in_(select(Trade.id))
+            )
+        )
+
+        # 2. Delete all sandbox decisions
+        sandbox_decisions = list(
+            s.scalars(select(Decision).where(Decision.mode == "sandbox"))
+        )
+        decisions_count = len(sandbox_decisions)
+        for d in sandbox_decisions:
+            s.delete(d)
+
+        # 3. Reset equity snapshots and seed baseline snapshot at starting capital
+        all_snaps = list(s.scalars(select(EquitySnapshot)))
+        for snap in all_snaps:
+            s.delete(snap)
+
+        sp_close: float | None = None
+        try:
+            sp_close = await asyncio.to_thread(bench.latest_sp500_close)
+        except Exception as e:
+            logger.debug("Failed to fetch S&P close during sandbox reset: %s", e)
+
+        base_cap = getattr(rt, "starting_capital", 15000.0)
+        s.add(
+            EquitySnapshot(
+                net_liq=base_cap,
+                realized_pnl_cum=0.0,
+                unrealized_pnl=0.0,
+                sp500_close=sp_close,
+            )
+        )
+
+        s.commit()
+
+        app.state.last_cycle_time = None
+
+        logger.info(
+            "Sandbox reset completed: %d trades deleted, %d decisions deleted, %d broker orders cancelled.",
+            trades_count,
+            decisions_count,
+            orders_cancelled,
+        )
+
+        return ResetSandboxOut(
+            status="ok",
+            message="Sandbox reset successfully. All sandbox positions, orders, and history have been cleared.",
+            trades_deleted=trades_count,
+            decisions_deleted=decisions_count,
+            orders_cancelled=orders_cancelled,
+        )
 
     @app.post("/api/approvals/{trade_id}/approve", response_model=ActionResult)
     async def approve(
@@ -833,6 +932,12 @@ def create_app(
     def events(
         after: int = 0, limit: int = 50, s: Session = Depends(get_session)
     ) -> list[EventFeedItem]:
+        max_id = s.scalar(select(func.max(TradeEvent.id))) or 0
+        if after > max_id:
+            # Client has an offset from before a database reset.
+            # Reset offset back to 0 so fresh events can be fetched.
+            after = 0
+
         if after == 0:
             # Seed request: fetch latest `limit` events in chronological order
             subq = select(TradeEvent).order_by(TradeEvent.id.desc()).limit(limit)

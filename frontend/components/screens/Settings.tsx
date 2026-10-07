@@ -2,12 +2,13 @@
 
 import { useEffect, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
-import { Bot, Check, HandCoins, Shield, SlidersHorizontal } from "lucide-react";
+import { AlertTriangle, Bot, Check, HandCoins, RotateCcw, Shield, SlidersHorizontal } from "lucide-react";
 import { toast } from "sonner";
 
-import { fetcher, putSettings, Settings as SettingsT, SettingsUpdate, fmtMoney0 } from "@/lib/api";
+import { fetcher, putSettings, resetSandbox, Settings as SettingsT, SettingsUpdate, fmtMoney0 } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -182,6 +183,36 @@ export default function Settings({
   const [form, setForm] = useState<Form | null>(null);
   const [snap, setSnap] = useState("");
   const [saving, setSaving] = useState(false);
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetting, setResetting] = useState(false);
+
+  const handleResetSandbox = async () => {
+    setResetting(true);
+    try {
+      const res = await resetSandbox();
+      toast.success(res.message || "Sandbox reset successfully");
+      setResetOpen(false);
+
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("tastyagent:sandbox_reset"));
+        localStorage.removeItem("tastyagent_last_read_event_id");
+      }
+
+      mutate("/api/positions");
+      mutate("/api/trades");
+      mutate("/api/trades/closed");
+      mutate("/api/approvals");
+      mutate("/api/pnl");
+      mutate("/api/activity");
+      mutate("/api/events");
+      mutate("/api/benchmark");
+      mutate("/api/status");
+    } catch (err: any) {
+      toast.error(err.message || "Failed to reset sandbox");
+    } finally {
+      setResetting(false);
+    }
+  };
 
   useEffect(() => {
     if (data && form === null) {
@@ -265,62 +296,90 @@ export default function Settings({
       </Tabs>
 
       {tab === "agent" && (
-        <Card>
-          <CardHeader className="flex-row items-center justify-between space-y-0">
-            <CardTitle><Bot className="size-4" /> Agent</CardTitle>
-            <SaveBar />
-          </CardHeader>
-          <CardContent>
-            <Field label="Trading mode" help="Switching to a live mode requires a typed confirm in the dialog.">
-              <Tabs value={mode} onValueChange={onModeChange}>
-                <TabsList>
-                  <TabsTrigger value="sandbox">Sandbox</TabsTrigger>
-                  <TabsTrigger value="live_approval">Live-approval</TabsTrigger>
-                  <TabsTrigger value="live_auto">Live-auto</TabsTrigger>
-                </TabsList>
-              </Tabs>
-            </Field>
-            <Field
-              label="Custom working capital"
-              help="When ON, size positions against custom capital below. When OFF, size dynamically against connected IBKR account Total Cash."
-            >
-              <Switch
-                checked={form.useCustomCapital}
-                onCheckedChange={(v) => set("useCustomCapital", v)}
-                aria-label="Custom working capital"
-              />
-            </Field>
-            <Field
-              label="Working capital"
-              help={
-                form.useCustomCapital
-                  ? "Capital the agent sizes positions against (fixed simulation)."
-                  : "Automatically using IBKR account Total Cash (USD equivalent across all forex positions)."
-              }
-              unit="$"
-              derived={
-                form.useCustomCapital
-                  ? `Per-trade BP cap = ${form.bpPerTrade}% × ${fmtMoney0(form.working_capital)} = ${fmtMoney0(Math.round((form.working_capital * form.bpPerTrade) / 100))}`
-                  : data?.account_cash_usd != null
-                  ? `IBKR Total Cash: ${fmtMoney0(data.account_cash_usd)} USD (Base: ${data.account_base_currency ?? "USD"} ${fmtMoney0(data.account_cash_base ?? data.account_cash_usd)}) · Per-trade cap = ${fmtMoney0(Math.round((data.account_cash_usd * form.bpPerTrade) / 100))}`
-                  : `Syncing with IBKR Total Cash... · Per-trade cap = ${form.bpPerTrade}%`
-              }
-            >
-              <NInput
-                value={form.useCustomCapital ? form.working_capital : (data?.account_cash_usd ?? form.working_capital)}
-                onChange={(v) => set("working_capital", v)}
-                disabled={!form.useCustomCapital}
-                w={104}
-              />
-            </Field>
-            <Field label="Cycle interval" help="How often the loop ticks while Auto is on (min 30s)." unit="min">
-              <NInput value={form.intervalMin} onChange={(v) => set("intervalMin", v)} />
-            </Field>
-            <Field label="Market hours only" help="When on, the scheduler won't fire outside regular hours.">
-              <Switch checked={form.marketHours} onCheckedChange={(v) => set("marketHours", v)} aria-label="Market hours only" />
-            </Field>
-          </CardContent>
-        </Card>
+        <div className="space-y-4">
+          <Card>
+            <CardHeader className="flex-row items-center justify-between space-y-0">
+              <CardTitle><Bot className="size-4" /> Agent</CardTitle>
+              <SaveBar />
+            </CardHeader>
+            <CardContent>
+              <Field label="Trading mode" help="Switching to a live mode requires a typed confirm in the dialog.">
+                <Tabs value={mode} onValueChange={onModeChange}>
+                  <TabsList>
+                    <TabsTrigger value="sandbox">Sandbox</TabsTrigger>
+                    <TabsTrigger value="live_approval">Live-approval</TabsTrigger>
+                    <TabsTrigger value="live_auto">Live-auto</TabsTrigger>
+                  </TabsList>
+                </Tabs>
+              </Field>
+              <Field
+                label="Custom working capital"
+                help="When ON, size positions against custom capital below. When OFF, size dynamically against connected IBKR account Total Cash."
+              >
+                <Switch
+                  checked={form.useCustomCapital}
+                  onCheckedChange={(v) => set("useCustomCapital", v)}
+                  aria-label="Custom working capital"
+                />
+              </Field>
+              <Field
+                label="Working capital"
+                help={
+                  form.useCustomCapital
+                    ? "Capital the agent sizes positions against (fixed simulation)."
+                    : "Automatically using IBKR account Total Cash (USD equivalent across all forex positions)."
+                }
+                unit="$"
+                derived={
+                  form.useCustomCapital
+                    ? `Per-trade BP cap = ${form.bpPerTrade}% × ${fmtMoney0(form.working_capital)} = ${fmtMoney0(Math.round((form.working_capital * form.bpPerTrade) / 100))}`
+                    : data?.account_cash_usd != null
+                    ? `IBKR Total Cash: ${fmtMoney0(data.account_cash_usd)} USD (Base: ${data.account_base_currency ?? "USD"} ${fmtMoney0(data.account_cash_base ?? data.account_cash_usd)}) · Per-trade cap = ${fmtMoney0(Math.round((data.account_cash_usd * form.bpPerTrade) / 100))}`
+                    : `Syncing with IBKR Total Cash... · Per-trade cap = ${form.bpPerTrade}%`
+                }
+              >
+                <NInput
+                  value={form.useCustomCapital ? form.working_capital : (data?.account_cash_usd ?? form.working_capital)}
+                  onChange={(v) => set("working_capital", v)}
+                  disabled={!form.useCustomCapital}
+                  w={104}
+                />
+              </Field>
+              <Field label="Cycle interval" help="How often the loop ticks while Auto is on (min 30s)." unit="min">
+                <NInput value={form.intervalMin} onChange={(v) => set("intervalMin", v)} />
+              </Field>
+              <Field label="Market hours only" help="When on, the scheduler won't fire outside regular hours.">
+                <Switch checked={form.marketHours} onCheckedChange={(v) => set("marketHours", v)} aria-label="Market hours only" />
+              </Field>
+            </CardContent>
+          </Card>
+
+          <Card className="border-loss/30 bg-loss/[0.02]">
+            <CardHeader className="flex-row items-center justify-between space-y-0">
+              <CardTitle className="text-loss flex items-center gap-2">
+                <AlertTriangle className="size-4 text-loss" /> Danger zone
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 py-2">
+                <div>
+                  <div className="text-sm font-medium text-foreground">Reset sandbox</div>
+                  <div className="mt-1 text-xs text-muted-foreground max-w-[540px]">
+                    Zero out and clear all sandbox positions, open orders, trade history, decisions, and performance metrics to start fresh. Any working sandbox orders on IBKR will be cancelled.
+                  </div>
+                </div>
+                <Button
+                  variant="destructive"
+                  className="bg-loss hover:bg-loss/90 text-white font-medium shrink-0"
+                  onClick={() => setResetOpen(true)}
+                >
+                  <RotateCcw className="size-3.5 mr-1.5" />
+                  Reset sandbox
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
       )}
 
       {tab === "strategy" && (
@@ -443,6 +502,39 @@ export default function Settings({
       <p className={cn("mt-3 text-xs text-text-faint")}>
         Settings are synchronized to backend/.env and persisted across restarts.
       </p>
+
+      <Dialog open={resetOpen} onOpenChange={setResetOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-loss">
+              <AlertTriangle className="size-5 text-loss" /> Reset sandbox environment?
+            </DialogTitle>
+            <DialogDescription className="pt-2 text-sm text-muted-foreground">
+              This action will permanently delete all sandbox positions, trades, orders, and execution history from the agent ledger. Any active sandbox Take-Profit or working limit orders on IBKR will also be cancelled.
+              <br /><br />
+              Are you sure you want to reset everything and start over from scratch?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="mt-4 flex gap-2 justify-end">
+            <Button
+              variant="outline"
+              onClick={() => setResetOpen(false)}
+              disabled={resetting}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              className="bg-loss hover:bg-loss/90 text-white font-medium"
+              onClick={handleResetSandbox}
+              disabled={resetting}
+            >
+              {resetting ? "Resetting…" : "Yes, reset sandbox"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
+

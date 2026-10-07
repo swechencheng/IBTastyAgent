@@ -189,3 +189,70 @@ def test_pnl_sync_endpoint():
     assert "reconciled" in data
     assert "marks_updated" in data
     assert "unrealized_pnl" in data
+
+
+def test_sandbox_reset_endpoint():
+    from unittest.mock import MagicMock
+    from tastyagent.db.models import EquitySnapshot, Decision, Trade
+
+    sf = shared_factory()
+    seed_open_and_closed(sf)
+
+    # Seed equity snapshot
+    s = sf()
+    s.add(EquitySnapshot(net_liq=10500.0, realized_pnl_cum=500.0, unrealized_pnl=0.0))
+    s.commit()
+    s.close()
+
+    mock_client = MagicMock()
+    mock_ib = MagicMock()
+    mock_ib.isConnected.return_value = True
+
+    mock_trade1 = MagicMock()
+    mock_trade1.order.orderId = 101
+    mock_trade1.order.orderRef = "TastyAgent_TP_1"
+
+    mock_trade2 = MagicMock()
+    mock_trade2.order.orderId = 102
+    mock_trade2.order.orderRef = "Manual_order"
+
+    mock_ib.openTrades.return_value = [mock_trade1, mock_trade2]
+    mock_client.active_trading_ib = mock_ib
+
+    app = create_app(
+        sf,
+        Runtime(mode=TradingMode.SANDBOX, starting_capital=15_000),
+        client=mock_client,
+    )
+    client = TestClient(app)
+
+    # Verify data exists before reset
+    assert len(client.get("/api/positions").json()) == 1
+    assert len(client.get("/api/trades").json()) == 2
+    assert len(client.get("/api/activity").json()) == 1
+
+    # Call reset
+    r = client.post("/api/sandbox/reset")
+    assert r.status_code == 200
+    res = r.json()
+    assert res["status"] == "ok"
+    assert res["trades_deleted"] == 2
+    assert res["decisions_deleted"] == 1
+    assert res["orders_cancelled"] == 1
+
+    # Verify cancelOrder was called for TastyAgent order only
+    mock_ib.cancelOrder.assert_called_once_with(mock_trade1.order)
+
+    # Verify everything in the ledger is zeroed out
+    assert client.get("/api/positions").json() == []
+    assert client.get("/api/trades").json() == []
+    assert client.get("/api/trades/closed").json() == []
+    assert client.get("/api/activity").json() == []
+
+    pnl = client.get("/api/pnl").json()
+    assert pnl["realized_pnl"] == 0.0
+    assert pnl["unrealized_pnl"] == 0.0
+    assert pnl["open_count"] == 0
+    assert pnl["closed_count"] == 0
+    assert pnl["starting_capital"] == 15_000
+

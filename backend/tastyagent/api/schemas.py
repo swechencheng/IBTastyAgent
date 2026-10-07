@@ -241,3 +241,11 @@ class ActivityItem(BaseModel):
     @field_serializer("created_at", when_used="json")
     def serialize_created_at(self, v: datetime) -> str | None:
         return _iso_utc(v)
+
+
+class ResetSandboxOut(BaseModel):
+    status: str
+    message: str
+    trades_deleted: int
+    decisions_deleted: int
+    orders_cancelled: int
