@@ -324,9 +324,10 @@ class IBKRPlacer:
         leg_pairs: list[tuple[Option, str]] = []
         for leg in trade.legs:
             opt = await self._qualify_leg(trade.symbol, leg)
-            # Inverse of opening action
-            close_action = "BUY" if "sell" in leg.action.lower() else "SELL"
-            leg_pairs.append((opt, close_action))
+            # Match the combo definition with opening legs (SELL short legs, BUY long legs).
+            # Selling this BAG at -debit closes the position, matching build_closing_tp_order.
+            action = "SELL" if "sell" in leg.action.lower() else "BUY"
+            leg_pairs.append((opt, action))
 
         combo = build_combo_contract(trade.symbol, leg_pairs)
         debit_per_share = round(float(cost_to_close) / (100 * trade.contracts), 2)

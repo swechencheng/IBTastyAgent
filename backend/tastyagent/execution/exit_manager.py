@@ -107,36 +107,51 @@ async def manage_exits(
             )
             continue
 
-        if decision.action is ExitAction.ROLL and roll_fn is not None:
-            try:
-                roll = await roll_fn(trade, decision.roll_kind, mark)
-            except Exception as e:  # noqa: BLE001
-                outcomes.append(
-                    ExitOutcome(
-                        trade.id, trade.symbol, "error", decision.reason, str(e)
+        if decision.action is ExitAction.ROLL:
+            if roll_fn is not None:
+                try:
+                    roll = await roll_fn(trade, decision.roll_kind, mark)
+                except Exception as e:  # noqa: BLE001
+                    outcomes.append(
+                        ExitOutcome(
+                            trade.id, trade.symbol, "error", decision.reason, str(e)
+                        )
                     )
-                )
-                continue
-            if roll is not None:
-                new = ledger.record_roll(
-                    trade,
-                    roll.new_candidate,
-                    roll.contracts,
-                    roll.exit_debit,
-                    decision.reason,
-                    roll.new_order_id,
-                )
+                    continue
+                if roll is not None:
+                    new = ledger.record_roll(
+                        trade,
+                        roll.new_candidate,
+                        roll.contracts,
+                        roll.exit_debit,
+                        decision.reason,
+                        roll.new_order_id,
+                    )
+                    outcomes.append(
+                        ExitOutcome(
+                            trade.id,
+                            trade.symbol,
+                            "rolled",
+                            decision.reason,
+                            f"-> #{new.id}",
+                        )
+                    )
+                    continue
+
+            # If rolling untested side (tested delta threshold reached) and no credit roll is available,
+            # do NOT fall through to close! Keep holding the position.
+            if decision.roll_kind is RollKind.UNTESTED:
                 outcomes.append(
                     ExitOutcome(
                         trade.id,
                         trade.symbol,
-                        "rolled",
-                        decision.reason,
-                        f"-> #{new.id}",
+                        "hold",
+                        f"{decision.reason} (no credit roll; holding)",
                     )
                 )
                 continue
-            # No credit roll available -> fall through to a plain close.
+
+            # No credit roll available -> fall through to a plain close (e.g. 21-DTE roll).
             decision_reason = decision.reason + " (no credit roll; closed)"
         else:
             decision_reason = decision.reason

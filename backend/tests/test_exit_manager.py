@@ -123,7 +123,7 @@ async def test_roll_untested_when_tested():
     out = await manage_exits(
         lg,
         PARAMS,
-        mark_fn=mark(300.0, delta=0.35),
+        mark_fn=mark(300.0, delta=0.50),
         close_fn=FakeClose(),
         roll_fn=roller,
     )
@@ -142,6 +142,23 @@ async def test_roll_falls_back_to_close_without_credit():
     assert "no credit roll" in out[0].reason
     assert closer.calls == [(t.id, 200.0)]
     assert t.status is TradeStatus.CLOSED
+
+
+async def test_roll_untested_without_credit_holds():
+    lg = Ledger(in_memory_session())
+    t = make_open_trade(lg, exp_days=40, entry_days_ago=12)  # > 21 DTE, not DTE trigger
+    closer = FakeClose()
+    out = await manage_exits(
+        lg,
+        PARAMS,
+        mark_fn=mark(300.0, delta=0.50),
+        close_fn=closer,
+        roll_fn=FakeRoll(result=None),
+    )
+    assert out[0].action == "hold"
+    assert "no credit roll; holding" in out[0].reason
+    assert closer.calls == []
+    assert t.status is TradeStatus.OPEN
 
 
 async def test_only_manages_filled_positions():

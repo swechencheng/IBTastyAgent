@@ -378,8 +378,24 @@ async def _candidates_for_symbol(
         else None
     )
 
-    p_short = select_by_delta(puts, snaps, params.target_short_delta)
-    c_short = select_by_delta(calls, snaps, params.target_short_delta)
+    # Short legs must respect max_short_leg_delta cap
+    eligible_short_puts = [
+        p
+        for p in puts
+        if (s := snaps.get(getattr(p, "conId", None)))
+        and s.delta is not None
+        and abs(s.delta) <= params.max_short_leg_delta
+    ] or puts
+    eligible_short_calls = [
+        c
+        for c in calls
+        if (s := snaps.get(getattr(c, "conId", None)))
+        and s.delta is not None
+        and abs(s.delta) <= params.max_short_leg_delta
+    ] or calls
+
+    p_short = select_by_delta(eligible_short_puts, snaps, params.target_short_delta)
+    c_short = select_by_delta(eligible_short_calls, snaps, params.target_short_delta)
     p_long = select_by_delta(puts, snaps, params.spread_long_delta)
     c_long = select_by_delta(calls, snaps, params.spread_long_delta)
 

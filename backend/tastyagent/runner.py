@@ -44,6 +44,8 @@ from .portfolio.ledger import Ledger
 from .portfolio.pnl import summarize
 from .portfolio.watchlist import WatchlistRepo
 from .strategy.candidates import (
+    _parse_exp_date,
+    build_iron_condor_candidate,
     build_strangle_candidate,
     generate_candidates,
     pick_expiration,
@@ -185,8 +187,6 @@ async def _build_roll_candidate(
         return None
 
     if roll_kind is RollKind.OUT:
-        from .strategy.candidates import _parse_exp_date
-
         parsed_exps = [_parse_exp_date(e) for e in raw_exps]
         exp_date = pick_expiration(parsed_exps, params, today)
         if exp_date is None:
@@ -232,6 +232,178 @@ async def _build_roll_candidate(
         return build_strangle_candidate(
             sym, underlying, 1.0, (exp_date - today).days, p, c, sp, sc
         )
+
+    if roll_kind is RollKind.UNTESTED:
+        short_puts = [
+            l
+            for l in trade.legs
+            if l.option_type.lower() == "put" and "sell" in l.action.lower()
+        ]
+        short_calls = [
+            l
+            for l in trade.legs
+            if l.option_type.lower() == "call" and "sell" in l.action.lower()
+        ]
+        if not short_puts or not short_calls:
+            return None
+
+        sp_leg = short_puts[0]
+        sc_leg = short_calls[0]
+        long_puts = [
+            l
+            for l in trade.legs
+            if l.option_type.lower() == "put" and "buy" in l.action.lower()
+        ]
+        long_calls = [
+            l
+            for l in trade.legs
+            if l.option_type.lower() == "call" and "buy" in l.action.lower()
+        ]
+        is_iron_condor = bool(long_puts and long_calls)
+        lp_leg = long_puts[0] if is_iron_condor else None
+        lc_leg = long_calls[0] if is_iron_condor else None
+        put_width = abs(sp_leg.strike - lp_leg.strike) if lp_leg else 0.0
+        call_width = abs(sc_leg.strike - lc_leg.strike) if lc_leg else 0.0
+
+        # Untested side roll stays in the SAME expiration
+        exp = min((leg.expiration for leg in trade.legs), default=today)
+        exp_date = _parse_exp_date(exp)
+        exp_str = exp_date.strftime("%Y%m%d")
+        dte = max(0, (exp_date - today).days)
+
+        pattern = Option(sym, exp_str, right="", exchange="SMART")
+        try:
+            cds = await client.data_ib.reqContractDetailsAsync(pattern)
+            contracts = [cd.contract for cd in cds]
+        except Exception:
+            contracts = []
+
+        if not contracts:
+            contracts = [
+                Option(sym, exp_str, s, r, "SMART", currency="USD")
+                for s in eligible_strikes
+                for r in ("P", "C")
+            ]
+            await client.data_ib.qualifyContractsAsync(*contracts)
+            contracts = [c for c in contracts if c.conId > 0]
+
+        if not contracts:
+            return None
+
+        lo_rel, hi_rel = underlying * 0.70, underlying * 1.30
+        relevant_contracts = [
+            c for c in contracts if lo_rel <= c.strike <= hi_rel
+        ] or contracts
+        snaps = await snapshot_options(client.data_ib, relevant_contracts, timeout=8.0)
+
+        puts = [c for c in relevant_contracts if c.right == "P"]
+        calls = [c for c in relevant_contracts if c.right == "C"]
+
+        # Identify tested side
+        tested_side = mark.tested_side
+        if tested_side is None:
+            if abs(underlying - sc_leg.strike) <= abs(underlying - sp_leg.strike):
+                tested_side = OptionType.CALL
+            else:
+                tested_side = OptionType.PUT
+        elif isinstance(tested_side, str):
+            tested_side = OptionType(tested_side.lower())
+
+        if tested_side == OptionType.CALL:
+            # Short Call tested -> keep call side, roll put side UP towards spot
+            # Must keep short put strike < short call strike to prevent inversion
+            eligible_puts = [
+                p for p in puts if sp_leg.strike < p.strike < sc_leg.strike
+            ]
+            new_sp = select_by_delta(eligible_puts, snaps, params.target_short_delta)
+            if not new_sp:
+                return None
+
+            cs_candidates = [
+                c for c in calls if round(c.strike, 2) == round(sc_leg.strike, 2)
+            ]
+            if not cs_candidates:
+                return None
+            new_sc = cs_candidates[0]
+
+            if is_iron_condor:
+                new_lp_strike = round(new_sp.strike - put_width, 2)
+                lp_candidates = [p for p in puts if round(p.strike, 2) == new_lp_strike]
+                if not lp_candidates:
+                    lp_candidates = sorted(
+                        puts, key=lambda p: abs(p.strike - new_lp_strike)
+                    )
+                if not lp_candidates:
+                    return None
+                new_lp = lp_candidates[0]
+
+                lc_candidates = [
+                    c for c in calls if round(c.strike, 2) == round(lc_leg.strike, 2)
+                ]
+                if not lc_candidates:
+                    return None
+                new_lc = lc_candidates[0]
+
+                return build_iron_condor_candidate(
+                    sym, underlying, 1.0, dte, new_sp, new_lp, new_sc, new_lc, snaps
+                )
+            else:
+                sp_snap = snaps.get(new_sp.conId)
+                sc_snap = snaps.get(new_sc.conId)
+                if not sp_snap or not sc_snap:
+                    return None
+                return build_strangle_candidate(
+                    sym, underlying, 1.0, dte, new_sp, new_sc, sp_snap, sc_snap
+                )
+
+        else:
+            # Short Put tested -> keep put side, roll call side DOWN towards spot
+            # Must keep short call strike > short put strike to prevent inversion
+            eligible_calls = [
+                c for c in calls if sp_leg.strike < c.strike < sc_leg.strike
+            ]
+            new_sc = select_by_delta(eligible_calls, snaps, params.target_short_delta)
+            if not new_sc:
+                return None
+
+            ps_candidates = [
+                p for p in puts if round(p.strike, 2) == round(sp_leg.strike, 2)
+            ]
+            if not ps_candidates:
+                return None
+            new_sp = ps_candidates[0]
+
+            if is_iron_condor:
+                new_lc_strike = round(new_sc.strike + call_width, 2)
+                lc_candidates = [
+                    c for c in calls if round(c.strike, 2) == new_lc_strike
+                ]
+                if not lc_candidates:
+                    lc_candidates = sorted(
+                        calls, key=lambda c: abs(c.strike - new_lc_strike)
+                    )
+                if not lc_candidates:
+                    return None
+                new_lc = lc_candidates[0]
+
+                lp_candidates = [
+                    p for p in puts if round(p.strike, 2) == round(lp_leg.strike, 2)
+                ]
+                if not lp_candidates:
+                    return None
+                new_lp = lp_candidates[0]
+
+                return build_iron_condor_candidate(
+                    sym, underlying, 1.0, dte, new_sp, new_lp, new_sc, new_lc, snaps
+                )
+            else:
+                sp_snap = snaps.get(new_sp.conId)
+                sc_snap = snaps.get(new_sc.conId)
+                if not sp_snap or not sc_snap:
+                    return None
+                return build_strangle_candidate(
+                    sym, underlying, 1.0, dte, new_sp, new_sc, sp_snap, sc_snap
+                )
 
     return None
 
@@ -313,6 +485,16 @@ async def run_one_cycle(
                 client, trade, roll_kind, mark, params
             )
             if new_cand is None or new_cand.net_credit <= 0:
+                return None
+            if (
+                roll_kind is RollKind.UNTESTED
+                and new_cand.net_credit < mark.cost_to_close
+            ):
+                logger.info(
+                    "Roll untested candidate credit $%.2f < cost to close $%.2f; skipping roll",
+                    new_cand.net_credit,
+                    mark.cost_to_close,
+                )
                 return None
             await placer.close(trade, mark.cost_to_close)
             new_order_id = await placer.open_candidate(new_cand, trade.contracts)

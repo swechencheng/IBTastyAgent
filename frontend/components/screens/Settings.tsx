@@ -24,6 +24,8 @@ type Form = {
   dteTarget: number;
   dteMax: number;
   shortDelta: number;
+  maxShortDelta: number;
+  testedDelta: number;
   topN: number;
   takeProfit: number;
   manageDte: number;
@@ -50,7 +52,9 @@ function fromSettings(s: SettingsT): Form {
     dteMin: n(st.min_dte, 30),
     dteTarget: n(st.target_dte, 45),
     dteMax: n(st.max_dte, 55),
-    shortDelta: Math.round(n(st.target_short_delta, 0.16) * 100),
+    shortDelta: Math.round(n(st.target_short_delta, 0.24) * 100),
+    maxShortDelta: Math.round(n(st.max_short_leg_delta, 0.25) * 100),
+    testedDelta: Math.round(n(st.tested_delta_threshold, 0.45) * 100),
     topN: n(st.universe_top_n, 15),
     takeProfit: Math.round(n(st.take_profit_pct, 0.5) * 100),
     manageDte: n(st.manage_dte, 21),
@@ -76,6 +80,8 @@ function toPayload(f: Form): SettingsUpdate {
       target_dte: f.dteTarget,
       max_dte: f.dteMax,
       target_short_delta: f.shortDelta / 100,
+      max_short_leg_delta: f.maxShortDelta / 100,
+      tested_delta_threshold: f.testedDelta / 100,
       universe_top_n: f.topN,
       take_profit_pct: f.takeProfit / 100,
       manage_dte: f.manageDte,
@@ -125,7 +131,16 @@ function Field({
         </div>
       </div>
       {derived && (
-        <div className="mt-2 inline-block rounded-md bg-gain-soft px-2.5 py-1 font-mono text-xs text-gain">{derived}</div>
+        <div
+          className={cn(
+            "mt-2 inline-block rounded-md px-2.5 py-1 font-mono text-xs",
+            derived.startsWith("⚠️")
+              ? "bg-loss-soft text-loss font-medium"
+              : "bg-gain-soft text-gain"
+          )}
+        >
+          {derived}
+        </div>
       )}
     </div>
   );
@@ -182,9 +197,23 @@ export default function Settings({
   const set = <K extends keyof Form>(k: K, v: Form[K]) => setForm((p) => (p ? { ...p, [k]: v } : p));
   const dirty = JSON.stringify(form) !== snap;
 
+  const validationError = (() => {
+    if (!form) return null;
+    if (form.working_capital <= 0) return "Working capital must be greater than 0";
+    if (form.shortDelta <= 0) return "Target short delta must be greater than 0";
+    if (form.shortDelta > form.maxShortDelta) {
+      return `Target short delta (${form.shortDelta}Δ) cannot exceed Max short leg delta (${form.maxShortDelta}Δ)`;
+    }
+    if (form.maxShortDelta >= form.testedDelta) {
+      return `Max short leg delta (${form.maxShortDelta}Δ) must be strictly less than Tested delta threshold (${form.testedDelta}Δ)`;
+    }
+    if (form.testedDelta > 90) return "Tested delta threshold must be ≤ 90Δ";
+    return null;
+  })();
+
   const save = async () => {
-    if (form.working_capital <= 0) {
-      toast.error("Working capital must be greater than 0");
+    if (validationError) {
+      toast.error(validationError);
       return;
     }
     setSaving(true);
@@ -205,9 +234,14 @@ export default function Settings({
 
   const SaveBar = () =>
     dirty ? (
-      <Button size="sm" onClick={save} disabled={saving}>
-        {saving ? "Saving…" : "Save changes"}
-      </Button>
+      <div className="flex items-center gap-3">
+        {validationError && (
+          <span className="text-xs text-loss font-medium">{validationError}</span>
+        )}
+        <Button size="sm" onClick={save} disabled={saving || !!validationError}>
+          {saving ? "Saving…" : "Save changes"}
+        </Button>
+      </div>
     ) : (
       <span className="inline-flex items-center gap-1.5 text-xs text-text-faint">
         <Check className="size-3.5 text-gain" /> Saved
@@ -306,8 +340,37 @@ export default function Settings({
                 <NInput value={form.dteMax} onChange={(v) => set("dteMax", v)} w={64} />
               </span>
             </Field>
-            <Field label="Target short delta" help="Strike selection for short legs (≈16Δ ≈ 68% PoP)." unit="Δ">
+            <Field
+              label="Target short delta"
+              help="Target strike selection delta for short legs (e.g. 24Δ ≈ 52% OTM / ~70% PoP)."
+              unit="Δ"
+              derived={
+                form.shortDelta > form.maxShortDelta
+                  ? `⚠️ Guard violation: Target short delta (${form.shortDelta}Δ) cannot exceed Max short delta cap (${form.maxShortDelta}Δ)`
+                  : undefined
+              }
+            >
               <NInput value={form.shortDelta} onChange={(v) => set("shortDelta", v)} />
+            </Field>
+            <Field
+              label="Max short leg delta"
+              help="Hard cap on any short leg at entry. Target short delta must not exceed this."
+              unit="Δ"
+              derived={
+                form.maxShortDelta >= form.testedDelta
+                  ? `⚠️ Guard violation: Max short delta (${form.maxShortDelta}Δ) must be strictly less than Tested threshold (${form.testedDelta}Δ)`
+                  : undefined
+              }
+            >
+              <NInput value={form.maxShortDelta} onChange={(v) => set("maxShortDelta", v)} />
+            </Field>
+            <Field
+              label="Tested delta threshold"
+              help="Short-leg delta that triggers defense (roll untested side in). Must be higher than max short leg delta."
+              unit="Δ"
+              derived={`Defends when short leg reaches ${form.testedDelta}Δ (safety buffer: +${form.testedDelta - form.maxShortDelta}Δ above max entry)`}
+            >
+              <NInput value={form.testedDelta} onChange={(v) => set("testedDelta", v)} />
             </Field>
             <Field label="Universe top-N" help="How many highest-IVR names get chain work each cycle." unit="names">
               <NInput value={form.topN} onChange={(v) => set("topN", v)} />
@@ -328,6 +391,14 @@ export default function Settings({
             </Field>
             <Field label="Manage at DTE" help="Roll out / defend when a position reaches this DTE." unit="DTE">
               <NInput value={form.manageDte} onChange={(v) => set("manageDte", v)} />
+            </Field>
+            <Field
+              label="Tested delta threshold"
+              help="Short-leg delta that triggers defense (roll untested side in). Must be higher than max short leg delta."
+              unit="Δ"
+              derived={`Defends when short leg reaches ${form.testedDelta}Δ (safety buffer: +${form.testedDelta - form.maxShortDelta}Δ above max entry)`}
+            >
+              <NInput value={form.testedDelta} onChange={(v) => set("testedDelta", v)} />
             </Field>
             <Field label="Use hard stop" help="Off by default — tastytrade manages rather than stops out.">
               <Switch checked={form.hardStop} onCheckedChange={(v) => set("hardStop", v)} aria-label="Hard stop" />

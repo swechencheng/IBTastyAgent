@@ -58,14 +58,14 @@ def test_profit_takes_precedence_over_dte():
 
 def test_roll_untested_when_tested():
     d = evaluate_exit(
-        pos(cost=300.0, dte_remaining=40, days_held=12, delta=0.35), P
-    )  # losing, tested
+        pos(cost=300.0, dte_remaining=40, days_held=12, delta=0.50), P
+    )  # losing, tested (0.50 >= 0.45)
     assert d.action is ExitAction.ROLL
     assert d.roll_kind is RollKind.UNTESTED
 
 
 def test_below_tested_threshold_holds():
-    d = evaluate_exit(pos(cost=300.0, dte_remaining=40, days_held=12, delta=0.20), P)
+    d = evaluate_exit(pos(cost=300.0, dte_remaining=40, days_held=12, delta=0.35), P)
     assert d.action is ExitAction.HOLD
 
 

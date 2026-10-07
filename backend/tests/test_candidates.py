@@ -124,7 +124,7 @@ def test_put_credit_spread_is_defined_risk():
         45,
         _opt(95),
         _opt(90),
-        _snap("xs", 0.98, 1.02, -0.28),
+        _snap("xs", 0.98, 1.02, -0.24),
         _snap("xl", 0.39, 0.41, -0.10),
         option_type=OptionType.PUT,
         strategy=Strategy.PUT_CREDIT_SPREAD,

@@ -92,3 +92,53 @@ async def test_placer_immediate_fill_attaches_take_profit(mock_client):
     assert placed_tp_order.lmtPrice == -1.00  # 50% of $2.00 fill credit is $1.00 debit
     assert placed_tp_order.tif == "GTC"
     assert placed_tp_order.orderRef == "TastyAgent_TP_1"
+
+
+async def test_placer_close_uses_correct_combo_and_order(mock_client):
+    placer = IBKRPlacer(client=mock_client)
+    trade = Trade(
+        id=2,
+        symbol="AAPL",
+        strategy="iron_condor",
+        contracts=1,
+        status=TradeStatus.OPEN,
+        legs=[
+            TradeLeg(
+                option_type="put",
+                strike=320.0,
+                expiration=date(2026, 11, 20),
+                action="sell_to_open",
+            ),
+            TradeLeg(
+                option_type="put",
+                strike=290.0,
+                expiration=date(2026, 11, 20),
+                action="buy_to_open",
+            ),
+            TradeLeg(
+                option_type="call",
+                strike=355.0,
+                expiration=date(2026, 11, 20),
+                action="sell_to_open",
+            ),
+            TradeLeg(
+                option_type="call",
+                strike=385.0,
+                expiration=date(2026, 11, 20),
+                action="buy_to_open",
+            ),
+        ],
+    )
+    mock_order = MagicMock(orderId=201)
+    mock_trade = MagicMock(order=mock_order)
+    mock_client.trading_ib.placeOrder.return_value = mock_trade
+
+    order_id = await placer.close(trade, cost_to_close=850.0)
+    assert order_id == "201"
+    combo, order = mock_client.trading_ib.placeOrder.call_args[0]
+    assert combo.comboLegs[0].action == "SELL"
+    assert combo.comboLegs[1].action == "BUY"
+    assert combo.comboLegs[2].action == "SELL"
+    assert combo.comboLegs[3].action == "BUY"
+    assert order.action == "SELL"
+    assert order.lmtPrice == -8.50

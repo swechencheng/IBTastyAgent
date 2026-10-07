@@ -712,7 +712,10 @@ def create_app(
             if getattr(app.state, "scheduler_wake", None) is not None:
                 app.state.scheduler_wake.set()
         if req.strategy:
-            rt.strategy = _apply_updates(rt.strategy, req.strategy)
+            try:
+                rt.strategy = _apply_updates(rt.strategy, req.strategy)
+            except ValueError as e:
+                raise HTTPException(400, str(e)) from e
         if req.risk:
             rt.risk = _apply_updates(
                 rt.risk, {k: v for k, v in req.risk.items() if k != "kill_switch"}
