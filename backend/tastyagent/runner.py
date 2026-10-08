@@ -9,7 +9,6 @@ audit take-profit orders -> persist equity snapshot.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from datetime import date
 import logging
 from typing import Optional
@@ -417,8 +416,6 @@ async def run_one_cycle(
     watchlist: list[str] | None = None,
 ) -> dict:
     params = runtime.strategy
-    if runtime.mode is TradingMode.SANDBOX:
-        params = replace(params, max_bid_ask_width_pct=0.50)
     limits = runtime.risk_limits()
     ledger = Ledger(session)
 

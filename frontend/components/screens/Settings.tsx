@@ -638,7 +638,7 @@ export default function Settings({
             <CardContent>
               <Field
                 label="Max bid-ask spread width"
-                help="Maximum acceptable (ask - bid) / mid ratio for option legs (default: 10%, relaxed to 50% in sandbox)."
+                help="Maximum acceptable (ask - bid) / mid ratio for option legs (default: 10%). Strike candidates with wider spreads are rejected for illiquidity."
                 unit="%"
               >
                 <NInput value={form.maxBidAskWidthPct} onChange={(v) => set("maxBidAskWidthPct", v)} />
