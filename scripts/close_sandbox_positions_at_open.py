@@ -1,0 +1,1 @@
+../backend/scripts/close_sandbox_positions_at_open.py
