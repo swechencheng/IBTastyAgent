@@ -103,9 +103,10 @@ class BenchmarkPoint(BaseModel):
 class BenchmarkOut(BaseModel):
     strategy_return_pct: float
     sp500_return_pct: float
-    outperformance_pct: float
+    outperformance_pct: float | None = None
     strategy_curve: list[BenchmarkPoint]
     sp500_curve: list[BenchmarkPoint]
+    use_custom_working_capital: bool = True
 
 
 class ActionResult(BaseModel):

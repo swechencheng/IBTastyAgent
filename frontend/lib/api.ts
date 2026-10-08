@@ -97,9 +97,10 @@ export interface BenchmarkPoint {
 export interface Benchmark {
   strategy_return_pct: number;
   sp500_return_pct: number;
-  outperformance_pct: number;
+  outperformance_pct: number | null;
   strategy_curve: BenchmarkPoint[];
   sp500_curve: BenchmarkPoint[];
+  use_custom_working_capital?: boolean;
 }
 
 export const fetcher = (path: string) =>

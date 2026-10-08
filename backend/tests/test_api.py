@@ -96,6 +96,69 @@ def test_benchmark_with_snapshots():
     assert round(j["sp500_return_pct"], 4) == 0.02  # 500 -> 510
     assert len(j["strategy_curve"]) == 2 and len(j["sp500_curve"]) == 2
     assert j["sp500_curve"][0]["value"] == 1_000_000.0  # S&P rebased to start capital
+    assert j["use_custom_working_capital"] is True
+
+
+def test_benchmark_when_custom_working_capital_disabled():
+    from datetime import datetime, timezone
+    from tastyagent.db.models import EquitySnapshot
+
+    sf = shared_factory()
+    s = sf()
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    s.add(EquitySnapshot(ts=base, net_liq=10_000.0, sp500_close=500.0))
+    s.commit()
+    rt = Runtime(mode=TradingMode.SANDBOX, use_custom_working_capital=False)
+    client = TestClient(create_app(sf, rt))
+
+    j = client.get("/api/benchmark").json()
+    assert j["use_custom_working_capital"] is False
+    assert j["sp500_curve"] == []
+    assert j["outperformance_pct"] is None
+    assert len(j["strategy_curve"]) == 1
+    assert j["strategy_curve"][0]["value"] == 10_000.0
+
+
+def test_benchmark_recalculates_both_curves_on_working_capital_change():
+    from datetime import datetime, timedelta, timezone
+    from tastyagent.db.models import EquitySnapshot
+
+    sf = shared_factory()
+    s = sf()
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    s.add(EquitySnapshot(ts=base, net_liq=15_000.0, realized_pnl_cum=0.0, unrealized_pnl=0.0, sp500_close=500.0))
+    s.add(
+        EquitySnapshot(
+            ts=base + timedelta(days=1),
+            net_liq=15_500.0,
+            realized_pnl_cum=500.0,
+            unrealized_pnl=0.0,
+            sp500_close=510.0,
+        )
+    )
+    s.commit()
+    rt = Runtime(mode=TradingMode.SANDBOX, starting_capital=15_000.0, use_custom_working_capital=True)
+    client = TestClient(create_app(sf, rt))
+
+    j1 = client.get("/api/benchmark").json()
+    assert j1["strategy_curve"][0]["value"] == 15_000.0
+    assert j1["strategy_curve"][1]["value"] == 15_500.0
+    assert j1["sp500_curve"][0]["value"] == 15_000.0
+    assert j1["sp500_curve"][1]["value"] == 15_300.0  # 15000 * 510/500
+
+    # Now update working capital to 20,000
+    res = client.put("/api/settings", json={"working_capital": 20_000.0})
+    assert res.status_code == 200
+
+    # Both curves must now be recalculated based on 20,000!
+    j2 = client.get("/api/benchmark").json()
+    assert j2["strategy_curve"][0]["value"] == 20_000.0
+    assert j2["strategy_curve"][1]["value"] == 20_500.0  # 20000 + 500 PnL
+    assert j2["sp500_curve"][0]["value"] == 20_000.0
+    assert j2["sp500_curve"][1]["value"] == 20_400.0  # 20000 * 510/500
+    assert round(j2["strategy_return_pct"], 4) == 0.025  # 500 / 20000 = +2.5%
+    assert round(j2["sp500_return_pct"], 4) == 0.02  # +2.0%
+    assert round(j2["outperformance_pct"], 4) == 0.005  # +0.5%
 
 
 def test_mode_and_kill_switch():

@@ -154,11 +154,24 @@ export default function Overview({ goTo }: { goTo: (r: string) => void }) {
       <Card className="mb-[18px]">
         <CardHeader>
           <CardTitle>
-            <TrendingUp className="size-4" /> Equity vs. S&amp;P 500
+            <TrendingUp className="size-4" />{" "}
+            {settings.data?.use_custom_working_capital !== false && benchmark.data?.use_custom_working_capital !== false
+              ? "Equity vs. S&P 500"
+              : "Strategy Equity Curve"}
           </CardTitle>
         </CardHeader>
         <CardContent>
-          {benchmark.data ? <EquityChart data={benchmark.data} /> : <Empty>Equity curve builds as the agent trades.</Empty>}
+          {benchmark.data ? (
+            <EquityChart
+              data={benchmark.data}
+              useCustomCapital={
+                settings.data?.use_custom_working_capital !== false &&
+                benchmark.data?.use_custom_working_capital !== false
+              }
+            />
+          ) : (
+            <Empty>Equity curve builds as the agent trades.</Empty>
+          )}
         </CardContent>
       </Card>
 

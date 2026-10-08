@@ -242,15 +242,19 @@ def create_app(
         )
 
     @app.get("/api/benchmark", response_model=BenchmarkOut)
-    def benchmark(s: Session = Depends(get_session)) -> BenchmarkOut:
+    def benchmark(
+        s: Session = Depends(get_session), rt: Runtime = Depends(get_runtime)
+    ) -> BenchmarkOut:
+        use_custom_cap = getattr(rt, "use_custom_working_capital", True)
         snaps = list(s.scalars(select(EquitySnapshot).order_by(EquitySnapshot.ts)))
         if not snaps:
             return BenchmarkOut(
                 strategy_return_pct=0.0,
                 sp500_return_pct=0.0,
-                outperformance_pct=0.0,
+                outperformance_pct=None if not use_custom_cap else 0.0,
                 strategy_curve=[],
                 sp500_curve=[],
+                use_custom_working_capital=use_custom_cap,
             )
 
         # Filter out isolated transient single-point spikes (e.g. illiquid bid-ask dropouts)
@@ -271,6 +275,27 @@ def create_app(
                             continue
             clean_snaps.append(snap)
         snaps = clean_snaps
+
+        # When custom working capital is disabled, we do NOT compare against S&P 500
+        # because dynamic cost basis on a fluctuating multi-strategy IBKR account cannot be reliably tracked.
+        if not use_custom_cap:
+            strat_pts = [
+                BenchmarkPoint(date=snap.ts.date(), value=round(snap.net_liq, 2))
+                for snap in snaps
+            ]
+            strat_ret = (
+                bench._return_pct(strat_pts[0].value, strat_pts[-1].value)
+                if strat_pts
+                else 0.0
+            )
+            return BenchmarkOut(
+                strategy_return_pct=strat_ret,
+                sp500_return_pct=0.0,
+                outperformance_pct=None,
+                strategy_curve=strat_pts,
+                sp500_curve=[],
+                use_custom_working_capital=False,
+            )
 
         # 1. Forward-fill known S&P 500 closes across snapshots
         last_sp: float | None = None
@@ -312,6 +337,7 @@ def create_app(
                 BenchmarkPoint(date=d, value=v) for d, v in cmp.strategy_curve
             ],
             sp500_curve=[BenchmarkPoint(date=d, value=v) for d, v in cmp.sp500_curve],
+            use_custom_working_capital=True,
         )
 
     # --- controls ---
@@ -856,7 +882,9 @@ def create_app(
 
     @app.put("/api/settings", response_model=SettingsOut)
     def put_settings(
-        req: SettingsUpdate, rt: Runtime = Depends(get_runtime)
+        req: SettingsUpdate,
+        rt: Runtime = Depends(get_runtime),
+        s: Session = Depends(get_session),
     ) -> SettingsOut:
         if req.use_custom_working_capital is not None:
             rt.use_custom_working_capital = req.use_custom_working_capital
@@ -864,6 +892,18 @@ def create_app(
             if req.working_capital <= 0:
                 raise HTTPException(400, "working_capital must be > 0")
             rt.starting_capital = req.working_capital
+            # Recalculate all existing equity snapshots with the new working capital
+            # so both the equity curve and S&P 500 benchmark curve immediately rebase.
+            snaps = list(s.scalars(select(EquitySnapshot).order_by(EquitySnapshot.ts)))
+            if snaps:
+                for snap in snaps:
+                    snap.net_liq = round(
+                        req.working_capital
+                        + (snap.realized_pnl_cum or 0.0)
+                        + (snap.unrealized_pnl or 0.0),
+                        2,
+                    )
+                s.commit()
         if req.scheduler_interval_seconds is not None:
             rt.scheduler_interval_seconds = max(30.0, req.scheduler_interval_seconds)
             if getattr(app.state, "scheduler_wake", None) is not None:
@@ -1109,8 +1149,22 @@ def _default_app() -> FastAPI:
     client = IBKRClient(settings)
     metrics_session = client.data_ib
 
+    sf = session_factory(engine)
+    if settings.use_custom_working_capital:
+        with sf() as sess:
+            snaps = list(sess.scalars(select(EquitySnapshot).order_by(EquitySnapshot.ts)))
+            if snaps and abs(snaps[0].net_liq - settings.working_capital) > 0.01:
+                for snap in snaps:
+                    snap.net_liq = round(
+                        settings.working_capital
+                        + (snap.realized_pnl_cum or 0.0)
+                        + (snap.unrealized_pnl or 0.0),
+                        2,
+                    )
+                sess.commit()
+
     return create_app(
-        session_factory(engine),
+        sf,
         runtime,
         client=client,
         metrics_session=metrics_session,

@@ -425,6 +425,8 @@ export default function Settings({
       const next = await putSettings(toPayload(form));
       mutate("/api/settings", next, false);
       mutate("/api/status");
+      mutate("/api/pnl");
+      mutate("/api/benchmark");
       const f = fromSettings(next);
       setForm(f);
       setSnap(JSON.stringify(f));
