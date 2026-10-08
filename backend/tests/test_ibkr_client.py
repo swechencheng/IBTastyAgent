@@ -17,11 +17,42 @@ def test_ibkr_client_initialization():
         ibkr_data_client_id=78,
     )
     client = IBKRClient(settings)
+    assert client.settings.ibkr_sandbox_host == "127.0.0.1"
+    assert client.settings.ibkr_sandbox_port == 4002
+    assert client.settings.ibkr_sandbox_client_id == 77
+    assert client.settings.ibkr_live_host == "127.0.0.1"
+    assert client.settings.ibkr_live_port == 4001
+    assert client.settings.ibkr_live_client_id == 78
     assert client.settings.ibkr_host == "127.0.0.1"
     assert client.settings.ibkr_port == 4002
     assert client.settings.ibkr_client_id == 77
     assert client.settings.ibkr_account == "U999999"
     assert not client.is_connected
+
+
+def test_ibkr_sandbox_and_live_distinct_gateways():
+    settings = Settings(
+        ibkr_sandbox_host="192.168.1.10",
+        ibkr_sandbox_port=4002,
+        ibkr_sandbox_client_id=55,
+        ibkr_live_host="192.168.1.20",
+        ibkr_live_port=4001,
+        ibkr_live_client_id=56,
+        ibkr_account="U1234567",
+    )
+    assert settings.ibkr_sandbox_host == "192.168.1.10"
+    assert settings.ibkr_sandbox_port == 4002
+    assert settings.ibkr_sandbox_client_id == 55
+    assert settings.ibkr_live_host == "192.168.1.20"
+    assert settings.ibkr_live_port == 4001
+    assert settings.ibkr_live_client_id == 56
+    # Aliases
+    assert settings.ibkr_host == "192.168.1.10"
+    assert settings.ibkr_port == 4002
+    assert settings.ibkr_client_id == 55
+    assert settings.ibkr_data_host == "192.168.1.20"
+    assert settings.ibkr_data_port == 4001
+    assert settings.ibkr_data_client_id == 56
 
 
 def test_sandbox_ignores_ibkr_account():

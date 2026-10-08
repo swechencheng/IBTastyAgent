@@ -21,11 +21,11 @@ async def main() -> None:
     settings = load_settings()
     print("Connecting to IBKR Gateway / TWS...")
     print(
-        f"  Trading session: {settings.ibkr_host}:{settings.ibkr_port} (clientId={settings.ibkr_client_id})"
+        f"  Sandbox (paper) session: {settings.ibkr_sandbox_host}:{settings.ibkr_sandbox_port} (clientId={settings.ibkr_sandbox_client_id})"
     )
-    if settings.ibkr_data_port:
+    if settings.ibkr_live_port:
         print(
-            f"  Market data session: {settings.ibkr_data_host}:{settings.ibkr_data_port} (clientId={settings.ibkr_data_client_id})"
+            f"  Live (real / market data) session: {settings.ibkr_live_host}:{settings.ibkr_live_port} (clientId={settings.ibkr_live_client_id})"
         )
 
     client = IBKRClient(settings)

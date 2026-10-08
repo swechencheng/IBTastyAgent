@@ -163,12 +163,19 @@ class SchedulerConfig(BaseModel):
 
 
 class IBKRConfig(BaseModel):
-    # Trading Gateway (Paper / Live)
+    # Sandbox (Paper Account) Gateway
+    sandbox_host: str = "127.0.0.1"
+    sandbox_port: int = 4002
+    sandbox_client_id: int = 55
+    # Live (Real Account) Gateway
+    live_host: str = "127.0.0.1"
+    live_port: int = 4001
+    live_client_id: int = 56
+    account: str = ""
+    # Legacy aliases (backward compatibility)
     host: str = "127.0.0.1"
     port: int = 4002
     client_id: int = 55
-    account: str = ""
-    # Market Data Gateway (Dual Gateway)
     data_host: str = "127.0.0.1"
     data_port: int = 4001
     data_client_id: int = 56

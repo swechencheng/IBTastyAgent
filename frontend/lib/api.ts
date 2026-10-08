@@ -169,6 +169,12 @@ export interface SchedulerConfig {
 }
 
 export interface IBKRConfig {
+  sandbox_host?: string;
+  sandbox_port?: number;
+  sandbox_client_id?: number;
+  live_host?: string;
+  live_port?: number;
+  live_client_id?: number;
   host: string;
   port: number;
   client_id: number;

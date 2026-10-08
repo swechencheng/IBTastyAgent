@@ -13,7 +13,7 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .config import RiskLimits, StrategyParams, TradingMode
@@ -75,20 +75,112 @@ class Settings(BaseSettings):
     api_host: str = Field(default="0.0.0.0", alias="TASTYAGENT_HOST")
     api_port: int = Field(default=3060, alias="TASTYAGENT_PORT")
 
-    # IBKR Connection & Trading (default to local gateway / TWS)
-    ibkr_host: str = Field(default="127.0.0.1", alias="IBKR_HOST")
-    ibkr_port: int = Field(default=4002, alias="IBKR_PORT")
-    ibkr_client_id: int = Field(default=55, alias="IBKR_CLIENT_ID")
+    # IBKR Sandbox (Paper Account) Gateway (default 127.0.0.1:4002)
+    ibkr_sandbox_host: str = Field(
+        default="127.0.0.1",
+        validation_alias=AliasChoices(
+            "IBKR_SANDBOX_HOST", "IBKR_HOST", "ibkr_sandbox_host", "ibkr_host"
+        ),
+        description="Host for IBKR Sandbox paper trading gateway (default: 127.0.0.1)",
+    )
+    ibkr_sandbox_port: int = Field(
+        default=4002,
+        validation_alias=AliasChoices(
+            "IBKR_SANDBOX_PORT", "IBKR_PORT", "ibkr_sandbox_port", "ibkr_port"
+        ),
+        description="Port for IBKR Sandbox paper trading gateway (default: 4002)",
+    )
+    ibkr_sandbox_client_id: int = Field(
+        default=55,
+        validation_alias=AliasChoices(
+            "IBKR_SANDBOX_CLIENT_ID",
+            "IBKR_CLIENT_ID",
+            "ibkr_sandbox_client_id",
+            "ibkr_client_id",
+        ),
+        description="Client ID for IBKR Sandbox paper trading gateway (default: 55)",
+    )
+
+    # IBKR Live (Real Account) Gateway (default 127.0.0.1:4001, also supplies real market data)
+    ibkr_live_host: str = Field(
+        default="127.0.0.1",
+        validation_alias=AliasChoices(
+            "IBKR_LIVE_HOST", "IBKR_DATA_HOST", "ibkr_live_host", "ibkr_data_host"
+        ),
+        description="Host for IBKR Live real account gateway & market data (default: 127.0.0.1)",
+    )
+    ibkr_live_port: int = Field(
+        default=4001,
+        validation_alias=AliasChoices(
+            "IBKR_LIVE_PORT", "IBKR_DATA_PORT", "ibkr_live_port", "ibkr_data_port"
+        ),
+        description="Port for IBKR Live real account gateway & market data (default: 4001)",
+    )
+    ibkr_live_client_id: int = Field(
+        default=56,
+        validation_alias=AliasChoices(
+            "IBKR_LIVE_CLIENT_ID",
+            "IBKR_DATA_CLIENT_ID",
+            "ibkr_live_client_id",
+            "ibkr_data_client_id",
+        ),
+        description="Client ID for IBKR Live real account gateway (default: 56)",
+    )
+
     ibkr_account: str = Field(
         default="",
         alias="IBKR_ACCOUNT",
         description="IBKR account ID for real-account live trading (e.g. U1234567). Ignored in sandbox mode.",
     )
 
-    # IBKR Real-time Market Data Connection (dual-gateway support)
-    ibkr_data_host: str = Field(default="127.0.0.1", alias="IBKR_DATA_HOST")
-    ibkr_data_port: int = Field(default=4001, alias="IBKR_DATA_PORT")
-    ibkr_data_client_id: int = Field(default=56, alias="IBKR_DATA_CLIENT_ID")
+    # Backward compatibility properties for existing call sites
+    @property
+    def ibkr_host(self) -> str:
+        return self.ibkr_sandbox_host
+
+    @ibkr_host.setter
+    def ibkr_host(self, v: str) -> None:
+        self.ibkr_sandbox_host = v
+
+    @property
+    def ibkr_port(self) -> int:
+        return self.ibkr_sandbox_port
+
+    @ibkr_port.setter
+    def ibkr_port(self, v: int) -> None:
+        self.ibkr_sandbox_port = v
+
+    @property
+    def ibkr_client_id(self) -> int:
+        return self.ibkr_sandbox_client_id
+
+    @ibkr_client_id.setter
+    def ibkr_client_id(self, v: int) -> None:
+        self.ibkr_sandbox_client_id = v
+
+    @property
+    def ibkr_data_host(self) -> str:
+        return self.ibkr_live_host
+
+    @ibkr_data_host.setter
+    def ibkr_data_host(self, v: str) -> None:
+        self.ibkr_live_host = v
+
+    @property
+    def ibkr_data_port(self) -> int:
+        return self.ibkr_live_port
+
+    @ibkr_data_port.setter
+    def ibkr_data_port(self, v: int) -> None:
+        self.ibkr_live_port = v
+
+    @property
+    def ibkr_data_client_id(self) -> int:
+        return self.ibkr_live_client_id
+
+    @ibkr_data_client_id.setter
+    def ibkr_data_client_id(self, v: int) -> None:
+        self.ibkr_live_client_id = v
 
     # IBKR Market Scanner & Execution
     ibkr_scan_code: str = Field(
@@ -278,26 +370,33 @@ def persist_settings_to_env(
 
     ibkr = updates.get("ibkr")
     if isinstance(ibkr, dict):
-        mapping = {
-            "host": "IBKR_HOST",
-            "port": "IBKR_PORT",
-            "client_id": "IBKR_CLIENT_ID",
-            "account": "IBKR_ACCOUNT",
-            "data_host": "IBKR_DATA_HOST",
-            "data_port": "IBKR_DATA_PORT",
-            "data_client_id": "IBKR_DATA_CLIENT_ID",
-            "scan_code": "IBKR_SCAN_CODE",
-            "scan_rows": "IBKR_SCAN_ROWS",
-            "walk_step": "IBKR_WALK_STEP",
-            "walk_interval": "IBKR_WALK_INTERVAL",
-            "attach_tp": "IBKR_ATTACH_TP",
-            "tp_pct": "IBKR_TP_PCT",
+        mapping: dict[str, list[str]] = {
+            "sandbox_host": ["IBKR_SANDBOX_HOST", "IBKR_HOST"],
+            "sandbox_port": ["IBKR_SANDBOX_PORT", "IBKR_PORT"],
+            "sandbox_client_id": ["IBKR_SANDBOX_CLIENT_ID", "IBKR_CLIENT_ID"],
+            "live_host": ["IBKR_LIVE_HOST", "IBKR_DATA_HOST"],
+            "live_port": ["IBKR_LIVE_PORT", "IBKR_DATA_PORT"],
+            "live_client_id": ["IBKR_LIVE_CLIENT_ID", "IBKR_DATA_CLIENT_ID"],
+            "host": ["IBKR_SANDBOX_HOST", "IBKR_HOST"],
+            "port": ["IBKR_SANDBOX_PORT", "IBKR_PORT"],
+            "client_id": ["IBKR_SANDBOX_CLIENT_ID", "IBKR_CLIENT_ID"],
+            "account": ["IBKR_ACCOUNT"],
+            "data_host": ["IBKR_LIVE_HOST", "IBKR_DATA_HOST"],
+            "data_port": ["IBKR_LIVE_PORT", "IBKR_DATA_PORT"],
+            "data_client_id": ["IBKR_LIVE_CLIENT_ID", "IBKR_DATA_CLIENT_ID"],
+            "scan_code": ["IBKR_SCAN_CODE"],
+            "scan_rows": ["IBKR_SCAN_ROWS"],
+            "walk_step": ["IBKR_WALK_STEP"],
+            "walk_interval": ["IBKR_WALK_INTERVAL"],
+            "attach_tp": ["IBKR_ATTACH_TP"],
+            "tp_pct": ["IBKR_TP_PCT"],
         }
-        for k, env_k in mapping.items():
+        for k, env_keys in mapping.items():
             if k in ibkr and ibkr[k] is not None:
                 v = ibkr[k]
                 env_val = "true" if v is True else ("false" if v is False else str(v))
-                key_value_pairs.append((env_k, env_val))
+                for env_k in env_keys:
+                    key_value_pairs.append((env_k, env_val))
 
     llm = updates.get("llm")
     if isinstance(llm, dict):

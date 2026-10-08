@@ -38,6 +38,8 @@ def test_settings_get_shape():
     assert "kill_switch" not in j["risk"]  # kill switch is its own toggle
     assert j["scheduler"]["market_hours_only"] is True
     assert "ibkr" in j and "port" in j["ibkr"]
+    assert "sandbox_host" in j["ibkr"] and "sandbox_port" in j["ibkr"] and "sandbox_client_id" in j["ibkr"]
+    assert "live_host" in j["ibkr"] and "live_port" in j["ibkr"] and "live_client_id" in j["ibkr"]
     assert "llm" in j and "model" in j["llm"]
     assert "system" in j and "api_port" in j["system"]
 
@@ -58,6 +60,31 @@ def test_settings_put_ibkr_llm_system():
     assert r["llm"]["model"] == "openai/gpt-4o"
     assert r["system"]["api_port"] == 3070
     assert r["system"]["auto_start_scheduler"] is True
+
+
+def test_settings_put_ibkr_sandbox_and_live():
+    c = client()
+    r = c.put(
+        "/api/settings",
+        json={
+            "ibkr": {
+                "sandbox_host": "10.0.0.1",
+                "sandbox_port": 4002,
+                "sandbox_client_id": 55,
+                "live_host": "10.0.0.2",
+                "live_port": 4001,
+                "live_client_id": 56,
+                "account": "U888888",
+            }
+        },
+    ).json()
+    assert r["ibkr"]["sandbox_host"] == "10.0.0.1"
+    assert r["ibkr"]["sandbox_port"] == 4002
+    assert r["ibkr"]["sandbox_client_id"] == 55
+    assert r["ibkr"]["live_host"] == "10.0.0.2"
+    assert r["ibkr"]["live_port"] == 4001
+    assert r["ibkr"]["live_client_id"] == 56
+    assert r["ibkr"]["account"] == "U888888"
 
 
 def test_settings_put_partial_update():

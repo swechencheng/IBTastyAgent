@@ -67,13 +67,15 @@ type Form = {
   consecutiveLossHalt: number;
 
   // --- IBKR Gateway ---
-  ibkrHost: string;
-  ibkrPort: number;
-  ibkrClientId: number;
+  // Sandbox (Paper Account)
+  ibkrSandboxHost: string;
+  ibkrSandboxPort: number;
+  ibkrSandboxClientId: number;
+  // Live (Real Account)
+  ibkrLiveHost: string;
+  ibkrLivePort: number;
+  ibkrLiveClientId: number;
   ibkrAccount: string;
-  ibkrDataHost: string;
-  ibkrDataPort: number;
-  ibkrDataClientId: number;
   ibkrScanCode: string;
   ibkrScanRows: number;
   ibkrWalkStep: number;
@@ -139,13 +141,13 @@ function fromSettings(sData: SettingsT): Form {
     dailyHalt: Math.round(n(rk.max_daily_loss_pct, 0.03) * 100),
     consecutiveLossHalt: n(rk.consecutive_loss_halt, 5),
 
-    ibkrHost: s(ib.host, "127.0.0.1"),
-    ibkrPort: n(ib.port, 4002),
-    ibkrClientId: n(ib.client_id, 55),
+    ibkrSandboxHost: s(ib.sandbox_host || ib.host, "127.0.0.1"),
+    ibkrSandboxPort: n(ib.sandbox_port ?? ib.port, 4002),
+    ibkrSandboxClientId: n(ib.sandbox_client_id ?? ib.client_id, 55),
+    ibkrLiveHost: s(ib.live_host || ib.data_host, "127.0.0.1"),
+    ibkrLivePort: n(ib.live_port ?? ib.data_port, 4001),
+    ibkrLiveClientId: n(ib.live_client_id ?? ib.data_client_id, 56),
     ibkrAccount: s(ib.account, ""),
-    ibkrDataHost: s(ib.data_host, "127.0.0.1"),
-    ibkrDataPort: n(ib.data_port, 4001),
-    ibkrDataClientId: n(ib.data_client_id, 56),
     ibkrScanCode: s(ib.scan_code, "OPT_VOLUME_MOST_ACTIVE"),
     ibkrScanRows: n(ib.scan_rows, 25),
     ibkrWalkStep: n(ib.walk_step, 0.01),
@@ -202,13 +204,20 @@ function toPayload(f: Form): SettingsUpdate {
       consecutive_loss_halt: f.consecutiveLossHalt,
     },
     ibkr: {
-      host: f.ibkrHost,
-      port: f.ibkrPort,
-      client_id: f.ibkrClientId,
+      sandbox_host: f.ibkrSandboxHost,
+      sandbox_port: f.ibkrSandboxPort,
+      sandbox_client_id: f.ibkrSandboxClientId,
+      live_host: f.ibkrLiveHost,
+      live_port: f.ibkrLivePort,
+      live_client_id: f.ibkrLiveClientId,
       account: f.ibkrAccount,
-      data_host: f.ibkrDataHost,
-      data_port: f.ibkrDataPort,
-      data_client_id: f.ibkrDataClientId,
+      // Legacy compatibility
+      host: f.ibkrSandboxHost,
+      port: f.ibkrSandboxPort,
+      client_id: f.ibkrSandboxClientId,
+      data_host: f.ibkrLiveHost,
+      data_port: f.ibkrLivePort,
+      data_client_id: f.ibkrLiveClientId,
       scan_code: f.ibkrScanCode,
       scan_rows: f.ibkrScanRows,
       walk_step: f.ibkrWalkStep,
@@ -411,8 +420,8 @@ export default function Settings({
     }
     if (form.bpPerTrade <= 0 || form.bpPerTrade > 100) return "Max trade BP % must be between 1% and 100%";
     if (form.bpTotal < form.bpPerTrade) return "Max total BP % must be greater than or equal to per-trade BP %";
-    if (form.ibkrPort <= 0 || form.ibkrPort > 65535) return "Invalid IBKR trading gateway port";
-    if (form.ibkrDataPort <= 0 || form.ibkrDataPort > 65535) return "Invalid IBKR market data port";
+    if (form.ibkrSandboxPort <= 0 || form.ibkrSandboxPort > 65535) return "Invalid IBKR sandbox gateway port";
+    if (form.ibkrLivePort <= 0 || form.ibkrLivePort > 65535) return "Invalid IBKR live gateway port";
     if (form.apiPort <= 0 || form.apiPort > 65535) return "Invalid backend API port";
     if (form.frontendPort <= 0 || form.frontendPort > 65535) return "Invalid frontend port";
     return null;
@@ -758,64 +767,64 @@ export default function Settings({
         <div className="space-y-4">
           <Card>
             <CardHeader className="flex-row items-center justify-between space-y-0">
-              <CardTitle><Cpu className="size-4" /> IBKR Trading Gateway</CardTitle>
+              <CardTitle><Cpu className="size-4" /> IBKR Sandbox (Paper Account) Gateway</CardTitle>
               <SaveBar />
             </CardHeader>
             <CardContent>
               <Field
-                label="Gateway Host"
-                help="Hostname or IP of the IBKR Gateway or TWS instance used for trading (IBKR_HOST)."
+                label="Sandbox Host"
+                help="Hostname or IP for IBKR Sandbox paper trading gateway (IBKR_SANDBOX_HOST: default 127.0.0.1)."
               >
-                <SInput value={form.ibkrHost} onChange={(v) => set("ibkrHost", v)} placeholder="127.0.0.1" />
+                <SInput value={form.ibkrSandboxHost} onChange={(v) => set("ibkrSandboxHost", v)} placeholder="127.0.0.1" />
               </Field>
               <Field
-                label="Gateway Port"
-                help="API port for trading gateway (IBKR_PORT: 4002 for paper, 4001 for live)."
+                label="Sandbox Port"
+                help="API port for IBKR Sandbox paper trading gateway (IBKR_SANDBOX_PORT: default 4002)."
                 unit="port"
               >
-                <NInput value={form.ibkrPort} onChange={(v) => set("ibkrPort", v)} w={96} />
+                <NInput value={form.ibkrSandboxPort} onChange={(v) => set("ibkrSandboxPort", v)} w={96} />
               </Field>
               <Field
-                label="Trading Client ID"
-                help="Dedicated client ID for trade order execution to avoid collisions with other bots (IBKR_CLIENT_ID)."
+                label="Sandbox Client ID"
+                help="Dedicated client ID for paper trading execution (IBKR_SANDBOX_CLIENT_ID: default 55)."
                 unit="id"
               >
-                <NInput value={form.ibkrClientId} onChange={(v) => set("ibkrClientId", v)} w={96} />
-              </Field>
-              <Field
-                label="Live Account ID"
-                help="Specific account ID (e.g. U24862056) for live trading. In sandbox mode, this is ignored and the connected paper gateway account is used automatically."
-              >
-                <SInput value={form.ibkrAccount} onChange={(v) => set("ibkrAccount", v)} placeholder="e.g. U1234567" />
+                <NInput value={form.ibkrSandboxClientId} onChange={(v) => set("ibkrSandboxClientId", v)} w={96} />
               </Field>
             </CardContent>
           </Card>
 
           <Card>
             <CardHeader className="flex-row items-center justify-between space-y-0">
-              <CardTitle><Cpu className="size-4" /> Real-time Market Data Gateway (Dual-Gateway)</CardTitle>
+              <CardTitle><Cpu className="size-4" /> IBKR Live (Real Account) Gateway</CardTitle>
               <SaveBar />
             </CardHeader>
             <CardContent>
               <Field
-                label="Market Data Host"
-                help="Host for streaming live real-time market data (IBKR_DATA_HOST). Allows streaming real market data while paper trading."
+                label="Live Host"
+                help="Hostname or IP for IBKR Live real account gateway & market data stream (IBKR_LIVE_HOST: default 127.0.0.1)."
               >
-                <SInput value={form.ibkrDataHost} onChange={(v) => set("ibkrDataHost", v)} placeholder="127.0.0.1" />
+                <SInput value={form.ibkrLiveHost} onChange={(v) => set("ibkrLiveHost", v)} placeholder="127.0.0.1" />
               </Field>
               <Field
-                label="Market Data Port"
-                help="Port for market data gateway (IBKR_DATA_PORT: e.g. 4001 live data port)."
+                label="Live Port"
+                help="API port for IBKR Live real account gateway & market data stream (IBKR_LIVE_PORT: default 4001)."
                 unit="port"
               >
-                <NInput value={form.ibkrDataPort} onChange={(v) => set("ibkrDataPort", v)} w={96} />
+                <NInput value={form.ibkrLivePort} onChange={(v) => set("ibkrLivePort", v)} w={96} />
               </Field>
               <Field
-                label="Market Data Client ID"
-                help="Dedicated client ID for streaming market data (IBKR_DATA_CLIENT_ID)."
+                label="Live Client ID"
+                help="Dedicated client ID for live trading execution & real-time market data stream (IBKR_LIVE_CLIENT_ID: default 56)."
                 unit="id"
               >
-                <NInput value={form.ibkrDataClientId} onChange={(v) => set("ibkrDataClientId", v)} w={96} />
+                <NInput value={form.ibkrLiveClientId} onChange={(v) => set("ibkrLiveClientId", v)} w={96} />
+              </Field>
+              <Field
+                label="Live Account ID"
+                help="Specific account ID (e.g. U1234567) for real-money live trading. In sandbox mode, this is ignored and the connected paper gateway account is used automatically."
+              >
+                <SInput value={form.ibkrAccount} onChange={(v) => set("ibkrAccount", v)} placeholder="e.g. U1234567" />
               </Field>
             </CardContent>
           </Card>

@@ -241,22 +241,22 @@ class IBKRClient:
             return True
         try:
             logger.debug(
-                "Connecting Real/Data Gateway at %s:%s (clientId=%s)...",
-                self.settings.ibkr_data_host,
-                self.settings.ibkr_data_port,
-                self.settings.ibkr_data_client_id,
+                "Connecting Live/Data Gateway at %s:%s (clientId=%s)...",
+                self.settings.ibkr_live_host,
+                self.settings.ibkr_live_port,
+                self.settings.ibkr_live_client_id,
             )
             await self.data_ib.connectAsync(
-                host=self.settings.ibkr_data_host,
-                port=self.settings.ibkr_data_port,
-                clientId=self.settings.ibkr_data_client_id,
+                host=self.settings.ibkr_live_host,
+                port=self.settings.ibkr_live_port,
+                clientId=self.settings.ibkr_live_client_id,
                 timeout=timeout,
                 readonly=False,  # Can place orders when live trading
             )
             logger.info(
-                "Real/Data Gateway connected at %s:%s",
-                self.settings.ibkr_data_host,
-                self.settings.ibkr_data_port,
+                "Live/Data Gateway connected at %s:%s",
+                self.settings.ibkr_live_host,
+                self.settings.ibkr_live_port,
             )
             try:
                 self.data_ib.reqMarketDataType(3)
@@ -267,9 +267,9 @@ class IBKRClient:
             return True
         except Exception as e:
             logger.debug(
-                "Real/Data Gateway connection attempt failed (%s:%s): %s",
-                self.settings.ibkr_data_host,
-                self.settings.ibkr_data_port,
+                "Live/Data Gateway connection attempt failed (%s:%s): %s",
+                self.settings.ibkr_live_host,
+                self.settings.ibkr_live_port,
                 e,
             )
             return False
@@ -279,31 +279,31 @@ class IBKRClient:
             return True
         try:
             logger.debug(
-                "Connecting Paper Gateway at %s:%s (clientId=%s)...",
-                self.settings.ibkr_host,
-                self.settings.ibkr_port,
-                self.settings.ibkr_client_id,
+                "Connecting Sandbox Gateway at %s:%s (clientId=%s)...",
+                self.settings.ibkr_sandbox_host,
+                self.settings.ibkr_sandbox_port,
+                self.settings.ibkr_sandbox_client_id,
             )
             await self.trading_ib.connectAsync(
-                host=self.settings.ibkr_host,
-                port=self.settings.ibkr_port,
-                clientId=self.settings.ibkr_client_id,
+                host=self.settings.ibkr_sandbox_host,
+                port=self.settings.ibkr_sandbox_port,
+                clientId=self.settings.ibkr_sandbox_client_id,
                 timeout=timeout,
                 readonly=False,
             )
             logger.info(
-                "Paper Gateway connected at %s:%s",
-                self.settings.ibkr_host,
-                self.settings.ibkr_port,
+                "Sandbox Gateway connected at %s:%s",
+                self.settings.ibkr_sandbox_host,
+                self.settings.ibkr_sandbox_port,
             )
             if not self.settings.mode.is_live:
                 self.refresh_account()
             return True
         except Exception as e:
             logger.debug(
-                "Paper Gateway connection attempt failed (%s:%s): %s",
-                self.settings.ibkr_host,
-                self.settings.ibkr_port,
+                "Sandbox Gateway connection attempt failed (%s:%s): %s",
+                self.settings.ibkr_sandbox_host,
+                self.settings.ibkr_sandbox_port,
                 e,
             )
             return False
