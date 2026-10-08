@@ -230,6 +230,77 @@ async def test_get_account_cash_summary_eur_base_with_forex_conversion():
     assert summary.forex_balances == {"EUR": 7000.0, "USD": 2391.30}
 
 
+async def test_get_account_cash_summary_sek_base_with_ledger_tags_and_buying_power():
+    from ib_async import AccountValue
+
+    settings = Settings(ibkr_account="U24862056")
+    client = IBKRClient(settings)
+    client.trading_ib = MagicMock()
+    client.trading_ib.isConnected.return_value = True
+    client.trading_ib.managedAccounts.return_value = ["U24862056"]
+    client.settings.mode = TradingMode.LIVE_AUTO
+    client.refresh_account()
+
+    client.trading_ib.accountValues.return_value = [
+        AccountValue(
+            account="U24862056",
+            tag="BuyingPower",
+            value="181098.42",
+            currency="SEK",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U24862056",
+            tag="NetLiquidation",
+            value="364947.05",
+            currency="SEK",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U24862056",
+            tag="TotalCashValue",
+            value="155098.73",
+            currency="SEK",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U24862056",
+            tag="$LEDGER-Currency",
+            value="SEK",
+            currency="SEK",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U24862056",
+            tag="$LEDGER-ExchangeRate",
+            value="10.00",
+            currency="USD",
+            modelCode="",
+        ),
+        AccountValue(
+            account="U24862056",
+            tag="$LEDGER-ExchangeRate",
+            value="1.00",
+            currency="SEK",
+            modelCode="",
+        ),
+    ]
+
+    summary = await client.get_account_cash_summary()
+    assert summary.base_currency == "SEK"
+    assert summary.total_cash_base == 155098.73
+    assert pytest.approx(summary.total_cash_usd, 0.01) == 15509.87
+    assert pytest.approx(summary.net_liq_usd, 0.01) == 36494.70
+    assert summary.buying_power == 181098.42
+    assert pytest.approx(summary.buying_power_usd, 0.01) == 18109.84
+
+    # Test get_account_summary returns USD buying power
+    acct_summary = await client.get_account_summary()
+    assert pytest.approx(acct_summary["BuyingPower"], 0.01) == 18109.84
+    assert pytest.approx(acct_summary["TotalCashValue"], 0.01) == 15509.87
+    assert pytest.approx(acct_summary["NetLiquidation"], 0.01) == 36494.70
+
+
 async def test_get_account_cash_summary_negative_cash():
     from ib_async import AccountValue
 

@@ -45,6 +45,7 @@ class AccountCashSummary:
     total_cash_usd: float = 0.0
     net_liq_usd: float = 0.0
     buying_power: float = 0.0
+    buying_power_usd: float = 0.0
     forex_balances: dict[str, float] = field(default_factory=dict)
 
 
@@ -195,7 +196,10 @@ class IBKRClient:
         active = self.active_trading_ib
         if self._trading_account and active.isConnected():
             try:
-                active.reqAccountUpdates(self._trading_account)
+                if hasattr(active, "client") and hasattr(active.client, "reqAccountUpdates"):
+                    active.client.reqAccountUpdates(True, self._trading_account)
+                else:
+                    active.reqAccountUpdates(self._trading_account)
             except Exception as e:
                 logger.debug("reqAccountUpdates failed: %s", e)
 
@@ -386,13 +390,25 @@ class IBKRClient:
 
     def _parse_account_values(self, av: list[Any]) -> AccountCashSummary:
         """Parse account values list into an AccountCashSummary."""
+        # 1. Detect base currency (e.g. SEK, EUR, USD, CAD, GBP)
         base_currency = "USD"
         for item in av:
-            if getattr(item, "tag", "") in ("Currency", "BaseCurrency") and getattr(
-                item, "value", ""
-            ):
-                base_currency = str(item.value).upper()
+            tag = getattr(item, "tag", "").replace("$LEDGER-", "")
+            curr = (getattr(item, "currency", "") or "").upper()
+            val_str = str(getattr(item, "value", "")).strip().upper()
+            if tag in ("NetLiquidation", "TotalCashValue", "BuyingPower") and curr and curr != "BASE":
+                base_currency = curr
                 break
+            if tag in ("Currency", "BaseCurrency") and val_str and val_str != "BASE":
+                base_currency = val_str
+                break
+            if tag == "ExchangeRate" and curr and curr != "BASE":
+                try:
+                    if float(item.value) == 1.0:
+                        base_currency = curr
+                        break
+                except (ValueError, TypeError):
+                    pass
 
         forex_balances: dict[str, float] = {}
         exchange_rates: dict[str, float] = {}
@@ -400,10 +416,11 @@ class IBKRClient:
         total_cash_usd_direct: Optional[float] = None
         net_liq_base = 0.0
         net_liq_usd_direct: Optional[float] = None
-        buying_power = 0.0
+        buying_power_base = 0.0
 
         for item in av:
-            tag = getattr(item, "tag", "")
+            raw_tag = getattr(item, "tag", "")
+            tag = raw_tag.replace("$LEDGER-", "")
             curr = (getattr(item, "currency", "") or "").upper()
             try:
                 val = float(item.value)
@@ -413,7 +430,7 @@ class IBKRClient:
             if tag == "ExchangeRate" and curr:
                 exchange_rates[curr] = val
 
-            elif tag in ("TotalCashBalance", "TotalCashValue"):
+            elif tag in ("TotalCashBalance", "TotalCashValue", "CashBalance"):
                 if curr == "BASE":
                     total_cash_base = val
                 elif curr == base_currency and total_cash_base == 0.0:
@@ -423,7 +440,7 @@ class IBKRClient:
                 if curr and curr != "BASE":
                     forex_balances[curr] = val
 
-            elif tag == "NetLiquidation":
+            elif tag in ("NetLiquidation", "NetLiquidationByCurrency"):
                 if curr == "BASE":
                     net_liq_base = val
                 elif curr == base_currency and net_liq_base == 0.0:
@@ -433,9 +450,9 @@ class IBKRClient:
 
             elif tag == "BuyingPower":
                 if curr == "BASE":
-                    buying_power = val
-                elif curr == base_currency and buying_power == 0.0:
-                    buying_power = val
+                    buying_power_base = val
+                elif curr == base_currency and buying_power_base == 0.0:
+                    buying_power_base = val
 
         # Calculate USD equivalent
         if base_currency == "USD":
@@ -449,19 +466,22 @@ class IBKRClient:
                 if net_liq_base != 0.0 or net_liq_usd_direct is None
                 else net_liq_usd_direct
             )
+            buying_power_usd = buying_power_base
         else:
-            # Base currency is non-USD (e.g. EUR, HKD, GBP, CAD, AUD).
-            # IBKR convention: 1 foreign unit * ExchangeRate = Base Currency units.
+            # Base currency is non-USD (e.g. SEK, EUR, HKD, GBP, CAD, AUD).
+            # IBKR quote convention: 1 foreign unit * ExchangeRate = Base Currency units.
             # So 1 USD * exchange_rates["USD"] = Base Currency units.
             # Therefore: USD amount = Base amount / exchange_rates["USD"].
             usd_rate = exchange_rates.get("USD", 0.0)
             if usd_rate > 0.0:
                 total_cash_usd = total_cash_base / usd_rate
                 net_liq_usd = net_liq_base / usd_rate
+                buying_power_usd = buying_power_base / usd_rate
             elif exchange_rates.get(base_currency, 0.0) > 0.0:
                 base_to_usd = exchange_rates[base_currency]
                 total_cash_usd = total_cash_base * base_to_usd
                 net_liq_usd = net_liq_base * base_to_usd
+                buying_power_usd = buying_power_base * base_to_usd
             elif total_cash_usd_direct is not None:
                 total_cash_usd = total_cash_usd_direct
                 net_liq_usd = (
@@ -469,6 +489,7 @@ class IBKRClient:
                     if net_liq_usd_direct is not None
                     else total_cash_usd_direct
                 )
+                buying_power_usd = buying_power_base
             else:
                 logger.warning(
                     "No exchange rate found to convert %s to USD; assuming 1:1 fallback.",
@@ -476,13 +497,15 @@ class IBKRClient:
                 )
                 total_cash_usd = total_cash_base
                 net_liq_usd = net_liq_base
+                buying_power_usd = buying_power_base
 
         return AccountCashSummary(
             base_currency=base_currency,
             total_cash_base=total_cash_base,
             total_cash_usd=total_cash_usd,
             net_liq_usd=net_liq_usd,
-            buying_power=buying_power,
+            buying_power=buying_power_base,
+            buying_power_usd=buying_power_usd,
             forex_balances=forex_balances,
         )
 
@@ -493,6 +516,8 @@ class IBKRClient:
             return self._last_cash_summary
         account = self.account
         av = active.accountValues(account)
+        if not av and hasattr(active, "wrapper") and getattr(active.wrapper, "acctSummary", None):
+            av = list(active.wrapper.acctSummary.values())
         if av:
             self._last_cash_summary = self._parse_account_values(av)
         return self._last_cash_summary
@@ -501,9 +526,9 @@ class IBKRClient:
         """Fetch comprehensive cash balances, base currency, and forex breakdown.
 
         Handles:
-        1. Base currency detection (e.g. USD, EUR, HKD, CAD, GBP, JPY).
+        1. Base currency detection (e.g. USD, EUR, SEK, HKD, CAD, GBP, JPY).
         2. Aggregation of multi-currency forex cash balances into Total Cash.
-        3. Conversion of Total Cash to USD at IBKR exchange rates if base currency is not USD.
+        3. Conversion of Total Cash, Net Liquidation, and Buying Power to USD at IBKR exchange rates if base currency is not USD.
         """
         active = self.active_trading_ib
         if not active.isConnected():
@@ -513,14 +538,14 @@ class IBKRClient:
         av = active.accountValues(account)
         if not av:
             try:
-                await active.reqAccountUpdatesAsync(account)
+                await asyncio.wait_for(active.reqAccountUpdatesAsync(account), timeout=2.5)
                 av = active.accountValues(account)
             except Exception as e:
                 logger.debug("reqAccountUpdatesAsync failed for %s: %s", account, e)
 
         if not av:
             try:
-                summary = await active.accountSummaryAsync(account)
+                summary = await active.accountSummaryAsync()
                 av = summary
             except Exception as e:
                 logger.debug("accountSummaryAsync failed for %s: %s", account, e)
@@ -535,5 +560,5 @@ class IBKRClient:
         return {
             "TotalCashValue": cash.total_cash_usd,
             "NetLiquidation": cash.net_liq_usd,
-            "BuyingPower": cash.buying_power,
+            "BuyingPower": cash.buying_power_usd,
         }
