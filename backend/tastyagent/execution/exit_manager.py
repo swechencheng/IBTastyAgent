@@ -72,6 +72,8 @@ def trade_to_position(trade: Trade, mark: PositionMark, today: date) -> OpenPosi
         dte_remaining=(exp - today).days,
         as_of=today,
         current_max_short_delta=mark.max_short_delta,
+        strike_width=trade.strike_width,
+        contracts=trade.contracts,
     )
 
 

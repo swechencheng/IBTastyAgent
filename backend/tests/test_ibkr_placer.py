@@ -142,3 +142,75 @@ async def test_placer_close_uses_correct_combo_and_order(mock_client):
     assert combo.comboLegs[3].action == "BUY"
     assert order.action == "SELL"
     assert order.lmtPrice == -8.50
+
+
+async def test_placer_attaches_tp_for_defined_risk_spread_normal_credit(mock_client):
+    placer = IBKRPlacer(
+        client=mock_client,
+        walk_step=0.01,
+        walk_interval=0,
+        attach_tp=True,
+        tp_pct=0.50,
+        min_credit_width_ratio=0.333,
+    )
+    # $5.00 width spread, fill credit $2.00.
+    # 33% width = $1.665 > 50% credit ($1.00) -> TP profit target is $1.00, TP debit is $1.00
+    trade = Trade(
+        id=3,
+        symbol="SPY",
+        strategy="put_credit_spread",
+        contracts=1,
+        status=TradeStatus.PLANNED,
+        mode="sandbox",
+        entry_credit=200.0,
+        legs=[
+            TradeLeg(option_type="put", strike=550.0, expiration=date(2026, 11, 20), action="sell_to_open"),
+            TradeLeg(option_type="put", strike=545.0, expiration=date(2026, 11, 20), action="buy_to_open"),
+        ],
+    )
+    parent_order = MagicMock(orderId=301)
+    parent_trade = MagicMock(order=parent_order, orderStatus=OrderStatus(orderId=301, status="Filled", avgFillPrice=-2.00))
+    tp_order = MagicMock(orderId=302)
+    tp_trade = MagicMock(order=tp_order)
+    mock_client.trading_ib.placeOrder.side_effect = [parent_trade, tp_trade]
+
+    await placer(trade)
+    placed_tp = mock_client.trading_ib.placeOrder.call_args_list[1][0][1]
+    assert placed_tp.action == "SELL"
+    assert placed_tp.lmtPrice == -1.00
+
+
+async def test_placer_attaches_tp_for_defined_risk_spread_deep_credit(mock_client):
+    placer = IBKRPlacer(
+        client=mock_client,
+        walk_step=0.01,
+        walk_interval=0,
+        attach_tp=True,
+        tp_pct=0.50,
+        min_credit_width_ratio=0.333,
+    )
+    # $5.00 width spread, fill credit $3.80.
+    # 33% width = $1.665 <= 50% credit ($1.90) -> TP profit target is $1.665, TP debit is $3.80 - $1.665 = $2.14
+    trade = Trade(
+        id=4,
+        symbol="SPY",
+        strategy="put_credit_spread",
+        contracts=1,
+        status=TradeStatus.PLANNED,
+        mode="sandbox",
+        entry_credit=380.0,
+        legs=[
+            TradeLeg(option_type="put", strike=550.0, expiration=date(2026, 11, 20), action="sell_to_open"),
+            TradeLeg(option_type="put", strike=545.0, expiration=date(2026, 11, 20), action="buy_to_open"),
+        ],
+    )
+    parent_order = MagicMock(orderId=401)
+    parent_trade = MagicMock(order=parent_order, orderStatus=OrderStatus(orderId=401, status="Filled", avgFillPrice=-3.80))
+    tp_order = MagicMock(orderId=402)
+    tp_trade = MagicMock(order=tp_order)
+    mock_client.trading_ib.placeOrder.side_effect = [parent_trade, tp_trade]
+
+    await placer(trade)
+    placed_tp = mock_client.trading_ib.placeOrder.call_args_list[1][0][1]
+    assert placed_tp.action == "SELL"
+    assert placed_tp.lmtPrice == -2.13

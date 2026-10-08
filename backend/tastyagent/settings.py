@@ -30,6 +30,7 @@ class _StrategyEnv(BaseSettings):
     max_short_leg_delta: float | None = None
     target_short_delta: float | None = None
     spread_long_delta: float | None = None
+    min_credit_width_ratio: float | None = None
     max_bid_ask_width_pct: float | None = None
     min_open_interest: int | None = None
     min_daily_volume: int | None = None

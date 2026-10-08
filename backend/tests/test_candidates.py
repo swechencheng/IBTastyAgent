@@ -124,17 +124,42 @@ def test_put_credit_spread_is_defined_risk():
         45,
         _opt(95),
         _opt(90),
-        _snap("xs", 0.98, 1.02, -0.24),
+        _snap("xs", 2.08, 2.12, -0.24),
         _snap("xl", 0.39, 0.41, -0.10),
         option_type=OptionType.PUT,
         strategy=Strategy.PUT_CREDIT_SPREAD,
     )
     assert c.strategy is Strategy.PUT_CREDIT_SPREAD
-    assert round(c.net_credit, 2) == 60.0  # (1.00 - 0.40) * 100
-    assert round(c.max_loss, 2) == 440.0  # (5 width - 0.60) * 100
+    assert round(c.net_credit, 2) == 170.0  # (2.10 - 0.40) * 100
+    assert round(c.max_loss, 2) == 330.0  # (5 width - 1.70) * 100
     assert c.buying_power_reduction == c.max_loss  # defined risk
     assert c.max_loss != float("inf")
+    assert round(c.strike_width, 2) == 5.0
+    assert round(c.credit_width_ratio, 3) == 0.340
     assert validate_candidate(c, PARAMS).ok
+
+
+def test_credit_spread_violates_one_third_width_rule():
+    from tastyagent.strategy.candidates import build_credit_spread_candidate
+    from tastyagent.models import OptionType
+
+    c = build_credit_spread_candidate(
+        "SPY",
+        100.0,
+        0.45,
+        45,
+        _opt(95),
+        _opt(90),
+        _snap("xs", 0.98, 1.02, -0.24),  # 1.00 mid - 0.40 mid = 0.60 credit on 5.0 width (12%)
+        _snap("xl", 0.39, 0.41, -0.10),
+        option_type=OptionType.PUT,
+        strategy=Strategy.PUT_CREDIT_SPREAD,
+    )
+    assert c is not None
+    assert round(c.credit_width_ratio, 3) == 0.120
+    res = validate_candidate(c, PARAMS)
+    assert not res.ok
+    assert any("1/3 rule" in v for v in res.violations)
 
 
 def test_credit_spread_requires_a_credit():
@@ -161,15 +186,17 @@ def test_iron_condor_candidate():
 
     ps, pl, cs, cl = _opt(90), _opt(85), _opt(110), _opt(115)
     snaps = {
-        ps.streamer_symbol: _snap(ps.streamer_symbol, 0.98, 1.02, -0.16),
+        ps.streamer_symbol: _snap(ps.streamer_symbol, 1.23, 1.27, -0.16),
         pl.streamer_symbol: _snap(pl.streamer_symbol, 0.39, 0.41, -0.07),
-        cs.streamer_symbol: _snap(cs.streamer_symbol, 0.98, 1.02, 0.15),
+        cs.streamer_symbol: _snap(cs.streamer_symbol, 1.23, 1.27, 0.15),
         cl.streamer_symbol: _snap(cl.streamer_symbol, 0.39, 0.41, 0.07),
     }
     c = build_iron_condor_candidate("SPY", 100.0, 0.45, 45, ps, pl, cs, cl, snaps)
     assert c.strategy is Strategy.IRON_CONDOR
     assert len(c.legs) == 4
-    assert round(c.net_credit, 2) == 120.0  # (1.00 + 1.00) - (0.40 + 0.40), *100
-    assert round(c.max_loss, 2) == 380.0  # (5 width - 1.20) * 100
-    assert c.buying_power_reduction == 380.0
+    assert round(c.net_credit, 2) == 170.0  # (1.25 + 1.25) - (0.40 + 0.40), *100
+    assert round(c.max_loss, 2) == 330.0  # (5 width - 1.70) * 100
+    assert c.buying_power_reduction == 330.0
+    assert round(c.strike_width, 2) == 5.0
+    assert round(c.credit_width_ratio, 3) == 0.340
     assert validate_candidate(c, PARAMS).ok

@@ -102,6 +102,75 @@ class CandidateTrade:
     def probability_of_profit(self) -> float:
         return probability_of_profit([leg.delta for leg in self.legs if leg.is_short])
 
+    @property
+    def strike_width(self) -> float | None:
+        """Strike width of defined-risk spread or iron condor (in dollars/share)."""
+        return calculate_strike_width(self.strategy, self.legs)
+
+    @property
+    def credit_width_ratio(self) -> float | None:
+        """Ratio of per-share net credit collected to strike width (Tastytrade 1/3 rule)."""
+        width = self.strike_width
+        if width and width > 0:
+            return (self.net_credit / 100.0) / width
+        return None
+
+
+def calculate_strike_width(strategy: Strategy | str, legs: tuple[Leg, ...] | list[Any]) -> float | None:
+    """Calculate the defined-risk strike width for credit spreads and iron condors.
+
+    - Credit Spread: abs(short_strike - long_strike)
+    - Iron Condor: max(put_wing_width, call_wing_width)
+    - Undefined-risk trades (strangles, naked puts/calls): returns None.
+    """
+    strat_val = strategy.value if isinstance(strategy, Strategy) else str(strategy).lower()
+    if strat_val in (
+        Strategy.PUT_CREDIT_SPREAD.value,
+        Strategy.CALL_CREDIT_SPREAD.value,
+    ):
+        short_legs = [
+            l
+            for l in legs
+            if (getattr(l, "is_short", False) or "sell" in str(getattr(l, "action", "")).lower())
+        ]
+        long_legs = [
+            l
+            for l in legs
+            if (
+                (hasattr(l, "is_short") and not l.is_short)
+                or "buy" in str(getattr(l, "action", "")).lower()
+            )
+        ]
+        if short_legs and long_legs:
+            return round(abs(short_legs[0].strike - long_legs[0].strike), 4)
+    elif strat_val == Strategy.IRON_CONDOR.value:
+        def _is_short(l) -> bool:
+            return getattr(l, "is_short", False) or "sell" in str(getattr(l, "action", "")).lower()
+
+        def _is_long(l) -> bool:
+            return (hasattr(l, "is_short") and not l.is_short) or "buy" in str(getattr(l, "action", "")).lower()
+
+        def _is_put(l) -> bool:
+            t = getattr(l, "option_type", "")
+            val = t.value if hasattr(t, "value") else str(t)
+            return val.lower().endswith("put")
+
+        def _is_call(l) -> bool:
+            t = getattr(l, "option_type", "")
+            val = t.value if hasattr(t, "value") else str(t)
+            return val.lower().endswith("call")
+
+        ps = [l for l in legs if _is_put(l) and _is_short(l)]
+        pl = [l for l in legs if _is_put(l) and _is_long(l)]
+        cs = [l for l in legs if _is_call(l) and _is_short(l)]
+        cl = [l for l in legs if _is_call(l) and _is_long(l)]
+
+        put_w = abs(ps[0].strike - pl[0].strike) if ps and pl else 0.0
+        call_w = abs(cs[0].strike - cl[0].strike) if cs and cl else 0.0
+        w = max(put_w, call_w)
+        return round(w, 4) if w > 0 else None
+    return None
+
 
 @dataclass(frozen=True)
 class OpenPosition:
@@ -119,6 +188,14 @@ class OpenPosition:
     current_max_short_delta: float | None = (
         None  # live |delta| of the most-tested short leg
     )
+    strike_width: float | None = None
+    contracts: int = 1
+
+    def __post_init__(self):
+        if self.strike_width is None and self.legs:
+            calculated = calculate_strike_width(self.strategy, self.legs)
+            if calculated is not None:
+                object.__setattr__(self, "strike_width", calculated)
 
     @property
     def days_held(self) -> int:

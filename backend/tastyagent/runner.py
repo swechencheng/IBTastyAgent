@@ -463,6 +463,7 @@ async def run_one_cycle(
             walk_interval=getattr(runtime, "ibkr_walk_interval", 5),
             attach_tp=getattr(runtime, "ibkr_attach_tp", True),
             tp_pct=getattr(runtime, "ibkr_tp_pct", 0.50),
+            min_credit_width_ratio=getattr(runtime.strategy, "min_credit_width_ratio", 0.333),
         )
         if runtime.mode in (TradingMode.SANDBOX, TradingMode.LIVE_AUTO)
         else runtime.placer

@@ -59,12 +59,14 @@ class IBKRPlacer:
         walk_interval: int = 5,
         attach_tp: bool = True,
         tp_pct: float = 0.50,
+        min_credit_width_ratio: float = 0.333,
     ) -> None:
         self.client = client
         self.walk_step = walk_step
         self.walk_interval = walk_interval
         self.attach_tp = attach_tp
         self.tp_pct = tp_pct
+        self.min_credit_width_ratio = min_credit_width_ratio
 
     @property
     def ib(self) -> IB:
@@ -199,9 +201,27 @@ class IBKRPlacer:
                     trade.entry_credit = round(fill_credit * 100 * trade.contracts, 2)
                     trade.broker_order_id = str(parent_trade.order.orderId)
 
-                    # Pre-attach Take Profit limit order at 50% max profit
+                    # Pre-attach Take Profit limit order at 50% max profit or 1/3 strike width
                     if self.attach_tp:
-                        tp_debit = round(fill_credit * self.tp_pct, 2)
+                        is_defined = trade.strategy in (
+                            "iron_condor",
+                            "put_credit_spread",
+                            "call_credit_spread",
+                        )
+                        profit_target_ps = fill_credit * self.tp_pct
+                        target_desc = f"{self.tp_pct:.0%} profit target"
+
+                        if is_defined:
+                            strike_width = trade.strike_width
+                            if strike_width is not None and strike_width > 0:
+                                width_target_ps = strike_width * self.min_credit_width_ratio
+                                # If 33% strike width target > 50% net credit, take 50% net credit.
+                                # Otherwise (width target <= 50% net credit), take width target.
+                                if width_target_ps < profit_target_ps:
+                                    profit_target_ps = width_target_ps
+                                    target_desc = f"1/3 width profit target (${profit_target_ps:.2f})"
+
+                        tp_debit = max(0.01, round(fill_credit - profit_target_ps, 2))
                         tp_order = build_closing_tp_order(
                             contracts=trade.contracts,
                             tp_debit_per_share=tp_debit,
@@ -216,9 +236,10 @@ class IBKRPlacer:
                         )
                         trade.tp_order_id = str(assigned_tp_id)
                         logger.info(
-                            "  🎯 Attached Take-Profit order #%s submitted: SELL combo @ -$%.2f debit (50%% profit target)",
+                            "  🎯 Attached Take-Profit order #%s submitted: SELL combo @ -$%.2f debit (%s)",
                             trade.tp_order_id,
                             tp_debit,
+                            target_desc,
                         )
 
                     return str(parent_trade.order.orderId)

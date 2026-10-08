@@ -44,6 +44,7 @@ type Form = {
   shortDelta: number;
   maxShortDelta: number;
   spreadLongDelta: number;
+  minCreditWidthRatio: number;
   testedDelta: number;
   topN: number;
   maxBidAskWidthPct: number;
@@ -118,6 +119,7 @@ function fromSettings(sData: SettingsT): Form {
     shortDelta: Math.round(n(st.target_short_delta, 0.24) * 100),
     maxShortDelta: Math.round(n(st.max_short_leg_delta, 0.25) * 100),
     spreadLongDelta: Math.round(n(st.spread_long_delta, 0.05) * 100),
+    minCreditWidthRatio: Number((n(st.min_credit_width_ratio, 0.333) * 100).toFixed(1)),
     testedDelta: Math.round(n(st.tested_delta_threshold, 0.45) * 100),
     topN: n(st.universe_top_n, 15),
     maxBidAskWidthPct: Math.round(n(st.max_bid_ask_width_pct, 0.10) * 100),
@@ -179,6 +181,7 @@ function toPayload(f: Form): SettingsUpdate {
       target_short_delta: f.shortDelta / 100,
       max_short_leg_delta: f.maxShortDelta / 100,
       spread_long_delta: f.spreadLongDelta / 100,
+      min_credit_width_ratio: f.minCreditWidthRatio / 100,
       tested_delta_threshold: f.testedDelta / 100,
       universe_top_n: f.topN,
       max_bid_ask_width_pct: f.maxBidAskWidthPct / 100,
@@ -619,6 +622,13 @@ export default function Settings({
                 <NInput value={form.spreadLongDelta} onChange={(v) => set("spreadLongDelta", v)} />
               </Field>
               <Field
+                label="Min credit / strike width ratio (1/3 Rule)"
+                help="Tastytrade rule for credit spreads & iron condors: minimum net credit collected as a % of strike width (e.g. 33.3% requires ≥$1.67 credit on a $5 spread)."
+                unit="%"
+              >
+                <NInput value={form.minCreditWidthRatio} onChange={(v) => set("minCreditWidthRatio", v)} step={0.5} />
+              </Field>
+              <Field
                 label="Tested delta threshold"
                 help="Short-leg delta that triggers defense (roll untested side in). Must be higher than max short leg delta."
                 unit="Δ"
@@ -679,7 +689,7 @@ export default function Settings({
             <SaveBar />
           </CardHeader>
           <CardContent>
-            <Field label="Take-profit" help="Close a winning trade at this percentage of max credit received." unit="%">
+            <Field label="Take-profit" help="Close a winning trade at this percentage of max credit received (or at 1/3 spread width for defined-risk spreads, whichever is smaller)." unit="%">
               <NInput value={form.takeProfit} onChange={(v) => set("takeProfit", v)} />
             </Field>
             <Field label="Manage at DTE" help="Roll out / manage defense when a position reaches this DTE (default: 21 DTE)." unit="DTE">

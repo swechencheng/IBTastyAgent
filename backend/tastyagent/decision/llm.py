@@ -49,10 +49,11 @@ not deploy all available buying power at once; favor many small occurrences over
 few large ones.
 - Defined-risk structures (spreads, iron condors) are preferable when buying power \
 or account size is constrained; undefined-risk (strangles, naked puts/calls) demand \
-ample buying power and high liquidity.
+ample buying power and high liquidity. On defined-risk spreads, enforce the 1/3 Strike Width \
+rule: collected credit must be at least 1/3 of the spread width (e.g. $1.67+ on a $5 spread).
 - Mechanical management (handled elsewhere by the agent) takes profits around 50% of \
-max and defends near 21 DTE, so favor entries with enough premium and time for that \
-to play out.
+max credit (or 1/3 spread width, whichever is smaller) and defends near 21 DTE, so favor \
+entries with enough premium and time for that to play out.
 - "Number of occurrences" beats conviction on any single trade. When unsure, prefer \
 spreading smaller positions across more candidates over a large single bet.
 
@@ -123,6 +124,12 @@ def _candidate_payload(candidate: CandidateTrade, cid: str) -> dict:
         ),
         "buying_power_per_contract": round(candidate.buying_power_reduction, 2),
         "underlying_price": round(candidate.underlying_price, 2),
+        "strike_width": candidate.strike_width,
+        "credit_width_ratio": (
+            round(candidate.credit_width_ratio, 3)
+            if candidate.credit_width_ratio is not None
+            else None
+        ),
         "max_short_leg_delta": round(candidate.max_short_leg_delta, 3),
         "probability_of_profit": round(candidate.probability_of_profit, 3),
         "liquidity": {

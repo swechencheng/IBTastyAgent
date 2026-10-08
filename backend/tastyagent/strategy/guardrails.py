@@ -47,6 +47,16 @@ def validate_candidate(
     # Must collect a credit to open (premium-selling agent).
     if candidate.net_credit <= 0:
         v.append(f"net_credit {candidate.net_credit:.2f} is not a credit")
+    elif candidate.strategy.is_defined_risk:
+        width = candidate.strike_width
+        if width is not None and width > 0:
+            credit_ps = candidate.net_credit / 100.0
+            ratio = credit_ps / width
+            if ratio < params.min_credit_width_ratio:
+                v.append(
+                    f"credit/width ratio {ratio:.3f} (${credit_ps:.2f}/${width:.2f}) < "
+                    f"min {params.min_credit_width_ratio:.3f} (1/3 rule)"
+                )
 
     # Liquidity filters.
     liq = candidate.liquidity

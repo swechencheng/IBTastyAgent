@@ -49,10 +49,35 @@ def evaluate_exit(position: OpenPosition, params: StrategyParams) -> ExitDecisio
     days_held = position.days_held
 
     # 1. Take profit first — lock in winners even if they're near 21 DTE.
-    if profit_pct >= params.take_profit_pct:
+    target_profit_pct = params.take_profit_pct
+    target_desc = f"{params.take_profit_pct:.0%} max-profit target"
+
+    if (
+        position.strategy.is_defined_risk
+        and position.strike_width is not None
+        and position.strike_width > 0
+        and position.entry_credit > 0
+    ):
+        width_profit_dollars = (
+            position.strike_width
+            * params.min_credit_width_ratio
+            * 100.0
+            * position.contracts
+        )
+        credit_profit_dollars = params.take_profit_pct * position.entry_credit
+        # If 33% strike width target > 50% net credit, take 50% net credit.
+        # Otherwise (33% strike width target <= 50% net credit), take 33% strike width.
+        if width_profit_dollars < credit_profit_dollars:
+            target_profit_pct = width_profit_dollars / position.entry_credit
+            target_desc = (
+                f"1/3 width profit target (${width_profit_dollars:.2f}, "
+                f"{target_profit_pct:.0%} of credit)"
+            )
+
+    if profit_pct >= target_profit_pct:
         return ExitDecision(
             ExitAction.CLOSE,
-            f"profit {profit_pct:.0%} >= {params.take_profit_pct:.0%} max-profit target",
+            f"profit {profit_pct:.0%} >= {target_desc}",
         )
     milestone = ahead_of_pace_milestone(position.strategy, profit_pct, days_held)
     if milestone is not None:

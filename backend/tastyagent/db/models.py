@@ -121,6 +121,12 @@ class Trade(Base):
 
         return pop([leg.delta for leg in self.legs if leg.action.startswith("sell")])
 
+    @property
+    def strike_width(self) -> float | None:
+        from ..models import calculate_strike_width
+
+        return calculate_strike_width(self.strategy, self.legs)
+
 
 class TradeLeg(Base):
     __tablename__ = "trade_legs"

@@ -56,3 +56,38 @@ def test_filter_keeps_only_passing():
     good = make_candidate()
     bad = make_candidate(iv_rank=0.05)
     assert filter_candidates([good, bad], PARAMS) == [good]
+
+
+def test_defined_risk_one_third_width_rule():
+    from tastyagent.models import Action, OptionType, Strategy
+    from .conftest import make_leg
+
+    # $5.00 width spread (95 short put, 90 long put)
+    legs = (
+        make_leg(OptionType.PUT, 95.0, Action.SELL_TO_OPEN, -0.20),
+        make_leg(OptionType.PUT, 90.0, Action.BUY_TO_OPEN, -0.08),
+    )
+    # $1.50 credit ($150 total): ratio = 1.50 / 5.0 = 0.300 < 0.333 -> rejected
+    bad = make_candidate(
+        strategy=Strategy.PUT_CREDIT_SPREAD,
+        legs=legs,
+        net_credit=150.0,
+        max_profit=150.0,
+        max_loss=350.0,
+        buying_power_reduction=350.0,
+    )
+    res_bad = validate_candidate(bad, PARAMS)
+    assert not res_bad.ok
+    assert any("1/3 rule" in v for v in res_bad.violations)
+
+    # $1.70 credit ($170 total): ratio = 1.70 / 5.0 = 0.340 >= 0.333 -> passes
+    good = make_candidate(
+        strategy=Strategy.PUT_CREDIT_SPREAD,
+        legs=legs,
+        net_credit=170.0,
+        max_profit=170.0,
+        max_loss=330.0,
+        buying_power_reduction=330.0,
+    )
+    res_good = validate_candidate(good, PARAMS)
+    assert res_good.ok

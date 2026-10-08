@@ -49,6 +49,8 @@ class StrategyParams:
     spread_long_delta: float = (
         0.07  # delta for protective long wings (spreads / condors)
     )
+    # Defined-risk spread / condor rule: min credit collected as ratio of strike width (Tastytrade 1/3 rule)
+    min_credit_width_ratio: float = 0.333
     # Liquidity filters
     max_bid_ask_width_pct: float = 0.10  # width / mid
     min_open_interest: int = 500
@@ -66,6 +68,10 @@ class StrategyParams:
     stop_loss_multiple: float = 2.0  # if use_hard_stop: close at N x credit loss
 
     def __post_init__(self):
+        if self.min_credit_width_ratio <= 0:
+            raise ValueError(
+                f"min_credit_width_ratio ({self.min_credit_width_ratio}) must be strictly positive"
+            )
         if self.target_short_delta > self.max_short_leg_delta:
             raise ValueError(
                 f"target_short_delta ({self.target_short_delta}) cannot exceed "
