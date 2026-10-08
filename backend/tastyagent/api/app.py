@@ -37,7 +37,9 @@ from .schemas import (
     BenchmarkPoint,
     ConnectionStatusOut,
     EventFeedItem,
+    IBKRConfig,
     KillSwitchRequest,
+    LLMConfig,
     ModeRequest,
     PnLOut,
     RankedSymbol,
@@ -47,6 +49,7 @@ from .schemas import (
     SettingsOut,
     SettingsUpdate,
     StatusOut,
+    SystemConfig,
     TastytradeWatchlist,
     ToggleRequest,
     TradeOut,
@@ -772,6 +775,62 @@ def create_app(
                 cash_base = summary.total_cash_base
                 base_curr = summary.base_currency
 
+        st = getattr(rt, "settings", None)
+        if st is None:
+            from ..settings import load_settings
+
+            st = load_settings()
+            rt.settings = st
+
+        from ..settings import load_frontend_env
+
+        fe_env = load_frontend_env()
+        fe_port = int(fe_env.get("PORT", "3066")) if fe_env.get("PORT") else 3066
+        fe_api_base = fe_env.get(
+            "NEXT_PUBLIC_API_BASE", f"http://localhost:{st.api_port}"
+        )
+
+        raw_key = st.openrouter_api_key or ""
+        masked_key = (
+            f"{raw_key[:10]}••••••••{raw_key[-4:]}"
+            if len(raw_key) > 14
+            else ("••••••••" if raw_key else "")
+        )
+
+        ibkr_cfg = IBKRConfig(
+            host=st.ibkr_host,
+            port=st.ibkr_port,
+            client_id=st.ibkr_client_id,
+            account=st.ibkr_account,
+            data_host=st.ibkr_data_host,
+            data_port=st.ibkr_data_port,
+            data_client_id=st.ibkr_data_client_id,
+            scan_code=st.ibkr_scan_code,
+            scan_rows=st.ibkr_scan_rows,
+            walk_step=getattr(rt, "ibkr_walk_step", st.ibkr_walk_step),
+            walk_interval=getattr(rt, "ibkr_walk_interval", st.ibkr_walk_interval),
+            attach_tp=getattr(rt, "ibkr_attach_tp", st.ibkr_attach_tp),
+            tp_pct=getattr(rt, "ibkr_tp_pct", st.ibkr_tp_pct),
+        )
+
+        llm_cfg = LLMConfig(
+            api_key=masked_key,
+            model=st.openrouter_model,
+            base_url=st.openrouter_base_url,
+            site_url=st.openrouter_site_url,
+            app_name=st.openrouter_app_name,
+        )
+
+        sys_cfg = SystemConfig(
+            api_host=st.api_host,
+            api_port=st.api_port,
+            frontend_port=fe_port,
+            frontend_api_base=fe_api_base,
+            auto_start_scheduler=getattr(
+                rt, "auto_start_scheduler", st.auto_start_scheduler
+            ),
+        )
+
         return SettingsOut(
             mode=rt.mode.value,
             kill_switch=rt.kill_switch,
@@ -786,6 +845,9 @@ def create_app(
             ),
             strategy=asdict(rt.strategy),
             risk=risk,
+            ibkr=ibkr_cfg,
+            llm=llm_cfg,
+            system=sys_cfg,
         )
 
     @app.get("/api/settings", response_model=SettingsOut)
@@ -810,6 +872,8 @@ def create_app(
             rt.scheduler_market_hours_only = req.scheduler_market_hours_only
             if getattr(app.state, "scheduler_wake", None) is not None:
                 app.state.scheduler_wake.set()
+        if req.auto_start_scheduler is not None:
+            rt.auto_start_scheduler = req.auto_start_scheduler
         if req.strategy:
             try:
                 rt.strategy = _apply_updates(rt.strategy, req.strategy)
@@ -819,6 +883,46 @@ def create_app(
             rt.risk = _apply_updates(
                 rt.risk, {k: v for k, v in req.risk.items() if k != "kill_switch"}
             )
+        st = getattr(rt, "settings", None)
+        if st is None:
+            from ..settings import load_settings
+
+            st = load_settings()
+            rt.settings = st
+
+        if st is not None:
+            if req.ibkr:
+                for k, v in req.ibkr.items():
+                    attr = f"ibkr_{k}" if not k.startswith("ibkr_") else k
+                    if hasattr(st, attr) and v is not None:
+                        setattr(st, attr, v)
+                if "walk_step" in req.ibkr and req.ibkr["walk_step"] is not None:
+                    rt.ibkr_walk_step = float(req.ibkr["walk_step"])
+                if "walk_interval" in req.ibkr and req.ibkr["walk_interval"] is not None:
+                    rt.ibkr_walk_interval = int(req.ibkr["walk_interval"])
+                if "attach_tp" in req.ibkr and req.ibkr["attach_tp"] is not None:
+                    rt.ibkr_attach_tp = bool(req.ibkr["attach_tp"])
+                if "tp_pct" in req.ibkr and req.ibkr["tp_pct"] is not None:
+                    rt.ibkr_tp_pct = float(req.ibkr["tp_pct"])
+            if req.llm:
+                for k, v in req.llm.items():
+                    attr = f"openrouter_{k}" if not k.startswith("openrouter_") else k
+                    if hasattr(st, attr) and v is not None:
+                        if k == "api_key" and ("••••" in str(v) or "..." in str(v)):
+                            continue
+                        setattr(st, attr, str(v))
+            if req.system:
+                if "api_host" in req.system and req.system["api_host"] is not None:
+                    st.api_host = str(req.system["api_host"])
+                if "api_port" in req.system and req.system["api_port"] is not None:
+                    st.api_port = int(req.system["api_port"])
+                if (
+                    "auto_start_scheduler" in req.system
+                    and req.system["auto_start_scheduler"] is not None
+                ):
+                    rt.auto_start_scheduler = bool(req.system["auto_start_scheduler"])
+                    st.auto_start_scheduler = bool(req.system["auto_start_scheduler"])
+
         _sync_env(req.model_dump(exclude_unset=True))
         return _settings_out(rt)
 
@@ -995,6 +1099,11 @@ def _default_app() -> FastAPI:
         scheduler_interval_seconds=settings.scheduler_interval_seconds,
         scheduler_market_hours_only=settings.scheduler_market_hours_only,
         auto_start_scheduler=settings.auto_start_scheduler,
+        ibkr_walk_step=settings.ibkr_walk_step,
+        ibkr_walk_interval=settings.ibkr_walk_interval,
+        ibkr_attach_tp=settings.ibkr_attach_tp,
+        ibkr_tp_pct=settings.ibkr_tp_pct,
+        settings=settings,
     )
 
     client = IBKRClient(settings)

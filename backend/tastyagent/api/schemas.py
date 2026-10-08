@@ -161,6 +161,41 @@ class SchedulerConfig(BaseModel):
     market_hours_only: bool
 
 
+class IBKRConfig(BaseModel):
+    # Trading Gateway (Paper / Live)
+    host: str = "127.0.0.1"
+    port: int = 4002
+    client_id: int = 55
+    account: str = ""
+    # Market Data Gateway (Dual Gateway)
+    data_host: str = "127.0.0.1"
+    data_port: int = 4001
+    data_client_id: int = 56
+    # Scanner & Execution
+    scan_code: str = "OPT_VOLUME_MOST_ACTIVE"
+    scan_rows: int = 25
+    walk_step: float = 0.01
+    walk_interval: int = 5
+    attach_tp: bool = True
+    tp_pct: float = 0.50
+
+
+class LLMConfig(BaseModel):
+    api_key: str = ""
+    model: str = "deepseek/deepseek-v4.1-flash"
+    base_url: str = "https://openrouter.ai/api/v1"
+    site_url: str = "https://github.com/swechencheng/IBTastyAgent"
+    app_name: str = "IBTastyAgent"
+
+
+class SystemConfig(BaseModel):
+    api_host: str = "0.0.0.0"
+    api_port: int = 3060
+    frontend_port: int = 3066
+    frontend_api_base: str = "http://localhost:3060"
+    auto_start_scheduler: bool = False
+
+
 class SettingsOut(BaseModel):
     mode: str
     kill_switch: bool
@@ -172,6 +207,9 @@ class SettingsOut(BaseModel):
     scheduler: SchedulerConfig
     strategy: dict  # StrategyParams fields
     risk: dict  # RiskLimits fields (excluding kill_switch, which is its own toggle)
+    ibkr: IBKRConfig = IBKRConfig()
+    llm: LLMConfig = LLMConfig()
+    system: SystemConfig = SystemConfig()
 
 
 class SettingsUpdate(BaseModel):
@@ -181,8 +219,12 @@ class SettingsUpdate(BaseModel):
     working_capital: float | None = None
     scheduler_interval_seconds: float | None = None
     scheduler_market_hours_only: bool | None = None
+    auto_start_scheduler: bool | None = None
     strategy: dict | None = None
     risk: dict | None = None
+    ibkr: dict | None = None
+    llm: dict | None = None
+    system: dict | None = None
 
 
 class EventFeedItem(BaseModel):

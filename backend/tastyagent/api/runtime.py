@@ -26,6 +26,7 @@ class Runtime:
     ibkr_walk_interval: int = 5
     ibkr_attach_tp: bool = True
     ibkr_tp_pct: float = 0.50
+    settings: Any | None = None
     placer: Placer | None = None  # set when a live/sandbox broker adapter is wired
 
     def risk_limits(self) -> RiskLimits:

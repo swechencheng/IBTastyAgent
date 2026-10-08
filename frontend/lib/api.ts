@@ -167,6 +167,38 @@ export interface SchedulerConfig {
   market_hours_only: boolean;
 }
 
+export interface IBKRConfig {
+  host: string;
+  port: number;
+  client_id: number;
+  account: string;
+  data_host: string;
+  data_port: number;
+  data_client_id: number;
+  scan_code: string;
+  scan_rows: number;
+  walk_step: number;
+  walk_interval: number;
+  attach_tp: boolean;
+  tp_pct: number;
+}
+
+export interface LLMConfig {
+  api_key: string;
+  model: string;
+  base_url: string;
+  site_url: string;
+  app_name: string;
+}
+
+export interface SystemConfig {
+  api_host: string;
+  api_port: number;
+  frontend_port: number;
+  frontend_api_base: string;
+  auto_start_scheduler: boolean;
+}
+
 export interface Settings {
   mode: string;
   kill_switch: boolean;
@@ -178,6 +210,10 @@ export interface Settings {
   scheduler: SchedulerConfig;
   strategy: Record<string, number | boolean>;
   risk: Record<string, number | boolean>;
+  auto_start_scheduler?: boolean;
+  ibkr: IBKRConfig;
+  llm: LLMConfig;
+  system: SystemConfig;
 }
 
 export interface SettingsUpdate {
@@ -185,8 +221,12 @@ export interface SettingsUpdate {
   working_capital?: number;
   scheduler_interval_seconds?: number;
   scheduler_market_hours_only?: boolean;
+  auto_start_scheduler?: boolean;
   strategy?: Record<string, number | boolean>;
   risk?: Record<string, number | boolean>;
+  ibkr?: Partial<IBKRConfig>;
+  llm?: Partial<LLMConfig>;
+  system?: Partial<SystemConfig>;
 }
 
 export async function putSettings(body: SettingsUpdate): Promise<Settings> {

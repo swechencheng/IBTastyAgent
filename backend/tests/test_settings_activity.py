@@ -37,6 +37,27 @@ def test_settings_get_shape():
     assert "max_trade_bp_pct" in j["risk"]
     assert "kill_switch" not in j["risk"]  # kill switch is its own toggle
     assert j["scheduler"]["market_hours_only"] is True
+    assert "ibkr" in j and "port" in j["ibkr"]
+    assert "llm" in j and "model" in j["llm"]
+    assert "system" in j and "api_port" in j["system"]
+
+
+def test_settings_put_ibkr_llm_system():
+    c = client()
+    r = c.put(
+        "/api/settings",
+        json={
+            "ibkr": {"host": "192.168.1.100", "port": 4001, "client_id": 99},
+            "llm": {"model": "openai/gpt-4o", "api_key": "••••••••"},
+            "system": {"api_port": 3070, "auto_start_scheduler": True},
+        },
+    ).json()
+    assert r["ibkr"]["host"] == "192.168.1.100"
+    assert r["ibkr"]["port"] == 4001
+    assert r["ibkr"]["client_id"] == 99
+    assert r["llm"]["model"] == "openai/gpt-4o"
+    assert r["system"]["api_port"] == 3070
+    assert r["system"]["auto_start_scheduler"] is True
 
 
 def test_settings_put_partial_update():

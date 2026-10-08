@@ -158,6 +158,42 @@ def find_env_file() -> Path:
     return candidate
 
 
+def find_frontend_env_file() -> Path:
+    """Resolve the frontend .env.local file location."""
+    candidate = Path(__file__).resolve().parents[2] / "frontend" / ".env.local"
+    if candidate.exists():
+        return candidate
+    candidate_alt = Path(__file__).resolve().parents[1] / "frontend" / ".env.local"
+    if candidate_alt.exists():
+        return candidate_alt
+    return candidate
+
+
+def load_frontend_env() -> dict[str, str]:
+    from dotenv import dotenv_values
+
+    target = find_frontend_env_file()
+    if target.exists():
+        return {k: str(v) for k, v in dotenv_values(target).items() if v is not None}
+    return {}
+
+
+def persist_frontend_env(updates: dict[str, Any]) -> None:
+    from dotenv import set_key
+
+    target = find_frontend_env_file()
+    logger = logging.getLogger("tastyagent.settings")
+    try:
+        if not target.exists() and target.parent.exists():
+            target.touch()
+        for k, v in updates.items():
+            if v is not None:
+                set_key(str(target), k, str(v), quote_mode="never")
+        logger.info("Persisted %d frontend settings to %s", len(updates), target)
+    except Exception as e:
+        logger.warning("Failed to persist frontend settings to %s: %s", target, e)
+
+
 def persist_settings_to_env(
     updates: dict[str, Any], env_file: Path | str | None = None
 ) -> None:
@@ -239,6 +275,70 @@ def persist_settings_to_env(
                 env_val = "true" if v is True else ("false" if v is False else str(v))
                 key_value_pairs.append((env_key, env_val))
 
+    ibkr = updates.get("ibkr")
+    if isinstance(ibkr, dict):
+        mapping = {
+            "host": "IBKR_HOST",
+            "port": "IBKR_PORT",
+            "client_id": "IBKR_CLIENT_ID",
+            "account": "IBKR_ACCOUNT",
+            "data_host": "IBKR_DATA_HOST",
+            "data_port": "IBKR_DATA_PORT",
+            "data_client_id": "IBKR_DATA_CLIENT_ID",
+            "scan_code": "IBKR_SCAN_CODE",
+            "scan_rows": "IBKR_SCAN_ROWS",
+            "walk_step": "IBKR_WALK_STEP",
+            "walk_interval": "IBKR_WALK_INTERVAL",
+            "attach_tp": "IBKR_ATTACH_TP",
+            "tp_pct": "IBKR_TP_PCT",
+        }
+        for k, env_k in mapping.items():
+            if k in ibkr and ibkr[k] is not None:
+                v = ibkr[k]
+                env_val = "true" if v is True else ("false" if v is False else str(v))
+                key_value_pairs.append((env_k, env_val))
+
+    llm = updates.get("llm")
+    if isinstance(llm, dict):
+        mapping = {
+            "api_key": "OPENROUTER_API_KEY",
+            "model": "OPENROUTER_MODEL",
+            "base_url": "OPENROUTER_BASE_URL",
+            "site_url": "OPENROUTER_SITE_URL",
+            "app_name": "OPENROUTER_APP_NAME",
+        }
+        for k, env_k in mapping.items():
+            if k in llm and llm[k] is not None:
+                v = str(llm[k]).strip()
+                if k == "api_key" and ("••••" in v or "..." in v):
+                    continue
+                key_value_pairs.append((env_k, v))
+
+    system = updates.get("system")
+    if isinstance(system, dict):
+        if "api_host" in system and system["api_host"] is not None:
+            key_value_pairs.append(("TASTYAGENT_HOST", str(system["api_host"])))
+        if "api_port" in system and system["api_port"] is not None:
+            key_value_pairs.append(("TASTYAGENT_PORT", str(system["api_port"])))
+        if (
+            "auto_start_scheduler" in system
+            and system["auto_start_scheduler"] is not None
+        ):
+            key_value_pairs.append(
+                (
+                    "TASTYAGENT_AUTO_START_SCHEDULER",
+                    "true" if system["auto_start_scheduler"] else "false",
+                )
+            )
+
+        fe_updates: dict[str, Any] = {}
+        if "frontend_port" in system and system["frontend_port"] is not None:
+            fe_updates["PORT"] = system["frontend_port"]
+        if "frontend_api_base" in system and system["frontend_api_base"] is not None:
+            fe_updates["NEXT_PUBLIC_API_BASE"] = system["frontend_api_base"]
+        if fe_updates:
+            persist_frontend_env(fe_updates)
+
     if not key_value_pairs:
         return
 
@@ -255,3 +355,4 @@ def persist_settings_to_env(
 
 def load_settings() -> Settings:
     return Settings()
+
