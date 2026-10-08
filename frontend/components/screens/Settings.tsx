@@ -65,6 +65,7 @@ type Form = {
   maxPerSym: number;
   dailyHalt: number;
   consecutiveLossHalt: number;
+  minCushionPct: number;
 
   // --- IBKR Gateway ---
   // Sandbox (Paper Account)
@@ -140,6 +141,7 @@ function fromSettings(sData: SettingsT): Form {
     maxPerSym: n(rk.max_positions_per_symbol, 2),
     dailyHalt: Math.round(n(rk.max_daily_loss_pct, 0.03) * 100),
     consecutiveLossHalt: n(rk.consecutive_loss_halt, 5),
+    minCushionPct: Math.round(n(rk.min_cushion_pct, 0.30) * 100),
 
     ibkrSandboxHost: s(ib.sandbox_host || ib.host, "127.0.0.1"),
     ibkrSandboxPort: n(ib.sandbox_port ?? ib.port, 4002),
@@ -202,6 +204,7 @@ function toPayload(f: Form): SettingsUpdate {
       max_positions_per_symbol: f.maxPerSym,
       max_daily_loss_pct: f.dailyHalt / 100,
       consecutive_loss_halt: f.consecutiveLossHalt,
+      min_cushion_pct: f.minCushionPct / 100,
     },
     ibkr: {
       sandbox_host: f.ibkrSandboxHost,
@@ -420,6 +423,7 @@ export default function Settings({
     }
     if (form.bpPerTrade <= 0 || form.bpPerTrade > 100) return "Max trade BP % must be between 1% and 100%";
     if (form.bpTotal < form.bpPerTrade) return "Max total BP % must be greater than or equal to per-trade BP %";
+    if (form.minCushionPct <= 0 || form.minCushionPct > 100) return "Min account cushion must be between 1% and 100%";
     if (form.ibkrSandboxPort <= 0 || form.ibkrSandboxPort > 65535) return "Invalid IBKR sandbox gateway port";
     if (form.ibkrLivePort <= 0 || form.ibkrLivePort > 65535) return "Invalid IBKR live gateway port";
     if (form.apiPort <= 0 || form.apiPort > 65535) return "Invalid backend API port";
@@ -757,6 +761,14 @@ export default function Settings({
             </Field>
             <Field label="Consecutive loss halt" help="Halt all new entries if the agent experiences N consecutive losing trades (default: 5)." unit="trades">
               <NInput value={form.consecutiveLossHalt} onChange={(v) => set("consecutiveLossHalt", v)} />
+            </Field>
+            <Field
+              label="Min Account Cushion (Live)"
+              help="In live trading mode, halt opening new positions if IBKR account margin cushion is below this threshold (default: 30%). Cushion = Excess Liquidity / Net Liquidation."
+              unit="%"
+              derived={data?.account_cushion != null ? `Current IBKR Cushion: ${(data.account_cushion * 100).toFixed(1)}%` : undefined}
+            >
+              <NInput value={form.minCushionPct} onChange={(v) => set("minCushionPct", v)} />
             </Field>
           </CardContent>
         </Card>

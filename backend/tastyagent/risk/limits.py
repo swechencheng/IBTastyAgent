@@ -20,6 +20,8 @@ class PortfolioState:
     positions_for_symbol: int  # open positions in the candidate's symbol
     realized_pnl_today: float  # signed dollars realized so far today
     consecutive_losses: int  # losing trades closed in a row
+    cushion: float | None = None  # IBKR margin cushion ratio (Excess Liquidity / Net Liq)
+    is_live: bool = False  # whether currently executing in live trading mode
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,11 @@ def check_new_entry(
 
     if limits.kill_switch:
         v.append("kill switch engaged")
+
+    if state.is_live and state.cushion is not None and state.cushion < limits.min_cushion_pct:
+        v.append(
+            f"IBKR account cushion {state.cushion:.1%} < min {limits.min_cushion_pct:.0%}"
+        )
 
     if state.open_positions >= limits.max_positions:
         v.append(f"open positions {state.open_positions} >= max {limits.max_positions}")

@@ -46,6 +46,7 @@ class AccountCashSummary:
     net_liq_usd: float = 0.0
     buying_power: float = 0.0
     buying_power_usd: float = 0.0
+    cushion: Optional[float] = None  # Excess Liquidity / Net Liquidation Value (e.g. 0.35 = 35%)
     forex_balances: dict[str, float] = field(default_factory=dict)
 
 
@@ -417,6 +418,8 @@ class IBKRClient:
         net_liq_base = 0.0
         net_liq_usd_direct: Optional[float] = None
         buying_power_base = 0.0
+        cushion_direct: Optional[float] = None
+        excess_liquidity_base: Optional[float] = None
 
         for item in av:
             raw_tag = getattr(item, "tag", "")
@@ -453,6 +456,13 @@ class IBKRClient:
                     buying_power_base = val
                 elif curr == base_currency and buying_power_base == 0.0:
                     buying_power_base = val
+
+            elif tag == "Cushion":
+                cushion_direct = val / 100.0 if val > 1.0 else val
+
+            elif tag in ("ExcessLiquidity", "ExcessLiquidity-S", "ExcessLiquidity-C"):
+                if curr == "BASE" or excess_liquidity_base is None:
+                    excess_liquidity_base = val
 
         # Calculate USD equivalent
         if base_currency == "USD":
@@ -499,6 +509,11 @@ class IBKRClient:
                 net_liq_usd = net_liq_base
                 buying_power_usd = buying_power_base
 
+        # Determine cushion
+        cushion: Optional[float] = cushion_direct
+        if cushion is None and excess_liquidity_base is not None and net_liq_base > 0:
+            cushion = max(0.0, excess_liquidity_base / net_liq_base)
+
         return AccountCashSummary(
             base_currency=base_currency,
             total_cash_base=total_cash_base,
@@ -506,6 +521,7 @@ class IBKRClient:
             net_liq_usd=net_liq_usd,
             buying_power=buying_power_base,
             buying_power_usd=buying_power_usd,
+            cushion=cushion,
             forex_balances=forex_balances,
         )
 
@@ -562,3 +578,8 @@ class IBKRClient:
             "NetLiquidation": cash.net_liq_usd,
             "BuyingPower": cash.buying_power_usd,
         }
+
+    async def get_account_cushion(self) -> Optional[float]:
+        """Fetch the current account cushion (Excess Liquidity / Net Liquidation Value)."""
+        cash = await self.get_account_cash_summary()
+        return cash.cushion

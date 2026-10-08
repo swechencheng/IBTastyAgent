@@ -136,3 +136,42 @@ async def test_non_positive_capital_halts_entries():
     assert len(res.planned) == 0
     assert len(res.rejected) == 1
     assert "insufficient capital" in res.rejected[0][1]
+
+
+async def test_live_cushion_below_threshold_halts_entries():
+    c = make_candidate(symbol="SPY")
+    # In live mode with cushion = 25% (< 30% min), new entries must be halted immediately
+    live_p = portfolio(net_liq=100_000.0)
+    live_p.cushion = 0.25
+    live_p.is_live = True
+
+    res = await run_cycle(
+        [c],
+        live_p,
+        {},
+        PARAMS,
+        LIMITS,
+        selector=selector_picking([(0, 1)]),
+    )
+    assert len(res.planned) == 0
+    assert len(res.rejected) == 1
+    assert "cushion guard" in res.rejected[0][1]
+    assert "25.0%" in res.commentary
+
+
+async def test_sandbox_mode_allows_low_cushion():
+    c = make_candidate(symbol="SPY")
+    # In sandbox mode (is_live=False), cushion < 30% does NOT halt
+    sandbox_p = portfolio(net_liq=100_000.0)
+    sandbox_p.cushion = 0.20
+    sandbox_p.is_live = False
+
+    res = await run_cycle(
+        [c],
+        sandbox_p,
+        {},
+        PARAMS,
+        LIMITS,
+        selector=selector_picking([(0, 1)]),
+    )
+    assert len(res.planned) == 1

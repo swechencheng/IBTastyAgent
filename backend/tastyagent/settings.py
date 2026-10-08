@@ -54,6 +54,7 @@ class _RiskEnv(BaseSettings):
     max_daily_loss_pct: float | None = None
     consecutive_loss_halt: int | None = None
     kill_switch: bool | None = None
+    min_cushion_pct: float | None = None
 
 
 def _merge(defaults, env_model):

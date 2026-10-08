@@ -60,6 +60,7 @@ class IBKRPlacer:
         attach_tp: bool = True,
         tp_pct: float = 0.50,
         min_credit_width_ratio: float = 0.333,
+        min_cushion_pct: float = 0.30,
     ) -> None:
         self.client = client
         self.walk_step = walk_step
@@ -67,6 +68,7 @@ class IBKRPlacer:
         self.attach_tp = attach_tp
         self.tp_pct = tp_pct
         self.min_credit_width_ratio = min_credit_width_ratio
+        self.min_cushion_pct = min_cushion_pct
 
     @property
     def ib(self) -> IB:
@@ -141,6 +143,21 @@ class IBKRPlacer:
             order_ref=order_ref,
         )
         await check_margin_preflight(self.ib, combo, preflight_order)
+
+        # 4b. Live Cushion Guard check
+        is_live = getattr(self.client.settings.mode, "is_live", False)
+        if is_live:
+            cash = self.client.cached_cash_summary() or await self.client.get_account_cash_summary()
+            if cash and cash.cushion is not None and cash.cushion < self.min_cushion_pct:
+                logger.error(
+                    "❌ [LIVE CUSHION GUARD] Blocked opening Trade #%s: IBKR account cushion %.1f%% < min %.1f%%",
+                    trade.id,
+                    cash.cushion * 100,
+                    self.min_cushion_pct * 100,
+                )
+                raise RuntimeError(
+                    f"Blocked by Live Cushion Guard: IBKR account cushion {cash.cushion:.1%} is below minimum {self.min_cushion_pct:.0%}"
+                )
 
         # 5. Walk-the-book Execution Loop
         rejected_market_price: Optional[float] = None

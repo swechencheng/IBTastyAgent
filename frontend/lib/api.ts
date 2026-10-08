@@ -214,6 +214,7 @@ export interface Settings {
   account_cash_usd?: number | null;
   account_cash_base?: number | null;
   account_base_currency?: string | null;
+  account_cushion?: number | null;
   scheduler: SchedulerConfig;
   strategy: Record<string, number | boolean>;
   risk: Record<string, number | boolean>;

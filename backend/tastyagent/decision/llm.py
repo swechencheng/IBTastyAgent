@@ -46,7 +46,8 @@ better liquidity; it lowers slippage on entry and management.
 - Stay small and diversified. Avoid concentrating buying power in one underlying or \
 one sector. Spread risk across uncorrelated names. Keep plenty of dry powder — do \
 not deploy all available buying power at once; favor many small occurrences over a \
-few large ones.
+few large ones. In live trading, account margin cushion must stay safely above 30% \
+(cushion < 30% halts all new entries).
 - Defined-risk structures (spreads, iron condors) are preferable when buying power \
 or account size is constrained; undefined-risk (strangles, naked puts/calls) demand \
 ample buying power and high liquidity. On defined-risk spreads, enforce the 1/3 Strike Width \

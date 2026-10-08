@@ -57,3 +57,25 @@ def test_daily_loss_halt_blocks():
 def test_consecutive_loss_halt_blocks():
     res = check_new_entry("SPY", 2000.0, healthy_state(consecutive_losses=5), LIMITS)
     assert not res.ok
+
+
+def test_live_cushion_below_threshold_blocks():
+    # In live mode, cushion of 28% (< 30% min) blocks new entries
+    state = healthy_state(is_live=True, cushion=0.28)
+    res = check_new_entry("SPY", 2000.0, state, LIMITS)
+    assert not res.ok
+    assert any("cushion" in v for v in res.violations)
+
+
+def test_live_cushion_above_threshold_allows():
+    # In live mode, cushion of 35% (>= 30% min) allows new entries
+    state = healthy_state(is_live=True, cushion=0.35)
+    res = check_new_entry("SPY", 2000.0, state, LIMITS)
+    assert res.ok
+
+
+def test_sandbox_mode_ignores_low_cushion():
+    # In sandbox mode (is_live=False), cushion < 30% does not block
+    state = healthy_state(is_live=False, cushion=0.20)
+    res = check_new_entry("SPY", 2000.0, state, LIMITS)
+    assert res.ok

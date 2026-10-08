@@ -461,3 +461,42 @@ async def test_start_stop_connection_monitor():
     client.stop_connection_monitor()
     assert client._monitor_running is False
     assert client._monitor_task is None
+
+
+async def test_account_cushion_parsing_direct():
+    from ib_async import AccountValue
+
+    settings = Settings(mode=TradingMode.LIVE_AUTO, ibkr_account="U123456")
+    client = IBKRClient(settings)
+    client.data_ib = MagicMock()
+    client.data_ib.isConnected.return_value = True
+    client.data_ib.managedAccounts.return_value = ["U123456"]
+    client.refresh_account()
+
+    client.data_ib.accountValues.return_value = [
+        AccountValue(account="U123456", tag="NetLiquidation", value="100000.0", currency="BASE", modelCode=""),
+        AccountValue(account="U123456", tag="Cushion", value="0.35", currency="", modelCode=""),
+    ]
+
+    cushion = await client.get_account_cushion()
+    assert cushion == 0.35
+
+
+async def test_account_cushion_fallback_from_excess_liquidity():
+    from ib_async import AccountValue
+
+    settings = Settings(mode=TradingMode.LIVE_AUTO, ibkr_account="U123456")
+    client = IBKRClient(settings)
+    client.data_ib = MagicMock()
+    client.data_ib.isConnected.return_value = True
+    client.data_ib.managedAccounts.return_value = ["U123456"]
+    client.refresh_account()
+
+    # When Cushion tag is missing, ExcessLiquidity / NetLiquidation = 25000 / 100000 = 0.25 (25%)
+    client.data_ib.accountValues.return_value = [
+        AccountValue(account="U123456", tag="NetLiquidation", value="100000.0", currency="BASE", modelCode=""),
+        AccountValue(account="U123456", tag="ExcessLiquidity", value="25000.0", currency="BASE", modelCode=""),
+    ]
+
+    cushion = await client.get_account_cushion()
+    assert cushion == 0.25

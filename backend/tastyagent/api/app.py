@@ -464,6 +464,15 @@ def create_app(
         s: Session = Depends(get_session),
         rt: Runtime = Depends(get_runtime),
     ) -> ActionResult:
+        # Check live cushion guard before approving
+        if rt.mode.is_live and getattr(app.state, "client", None) is not None:
+            cash = await app.state.client.get_account_cash_summary()
+            min_cushion = getattr(rt.limits, "min_cushion_pct", 0.30)
+            if cash.cushion is not None and cash.cushion < min_cushion:
+                raise HTTPException(
+                    409,
+                    f"Cannot approve trade: IBKR account cushion ({cash.cushion:.1%}) is below the {min_cushion:.0%} minimum safety threshold.",
+                )
         ex = Executor(Ledger(s), rt.mode, rt.placer)
         out = await ex.approve(trade_id)
         if out.action == "error":
@@ -793,6 +802,7 @@ def create_app(
         cash_usd = None
         cash_base = None
         base_curr = None
+        cushion = None
         client = getattr(app.state, "client", None)
         if client:
             summary = client.cached_cash_summary()
@@ -800,6 +810,7 @@ def create_app(
                 cash_usd = summary.total_cash_usd
                 cash_base = summary.total_cash_base
                 base_curr = summary.base_currency
+                cushion = summary.cushion
 
         st = getattr(rt, "settings", None)
         if st is None:
@@ -871,6 +882,7 @@ def create_app(
             account_cash_usd=cash_usd,
             account_cash_base=cash_base,
             account_base_currency=base_curr,
+            account_cushion=cushion,
             scheduler=SchedulerConfig(
                 interval_seconds=rt.scheduler_interval_seconds,
                 market_hours_only=rt.scheduler_market_hours_only,

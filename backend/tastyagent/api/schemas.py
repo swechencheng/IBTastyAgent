@@ -212,6 +212,7 @@ class SettingsOut(BaseModel):
     account_cash_usd: float | None = None
     account_cash_base: float | None = None
     account_base_currency: str | None = None
+    account_cushion: float | None = None
     scheduler: SchedulerConfig
     strategy: dict  # StrategyParams fields
     risk: dict  # RiskLimits fields (excluding kill_switch, which is its own toggle)

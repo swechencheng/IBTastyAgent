@@ -97,3 +97,4 @@ class RiskLimits:
     max_daily_loss_pct: float = 0.03  # halt new entries after this daily drawdown
     consecutive_loss_halt: int = 5  # halt after N losing trades in a row
     kill_switch: bool = False  # hard stop on all new orders
+    min_cushion_pct: float = 0.30  # live trading cushion guard: halt new entries if cushion < 30%

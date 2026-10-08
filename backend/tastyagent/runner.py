@@ -464,6 +464,7 @@ async def run_one_cycle(
             attach_tp=getattr(runtime, "ibkr_attach_tp", True),
             tp_pct=getattr(runtime, "ibkr_tp_pct", 0.50),
             min_credit_width_ratio=getattr(runtime.strategy, "min_credit_width_ratio", 0.333),
+            min_cushion_pct=getattr(limits, "min_cushion_pct", 0.30),
         )
         if runtime.mode in (TradingMode.SANDBOX, TradingMode.LIVE_AUTO)
         else runtime.placer
@@ -511,38 +512,65 @@ async def run_one_cycle(
             roll_fn=_roll,
         )
 
+    # Check account cushion from IBKR
+    cash_summary = await client.get_account_cash_summary()
+    cushion = cash_summary.cushion
+    is_live_mode = (
+        runtime.mode.is_live
+        if hasattr(runtime.mode, "is_live")
+        else runtime.mode in (TradingMode.LIVE_AUTO, TradingMode.LIVE_APPROVAL)
+    )
+
+    cushion_blocked = (
+        is_live_mode and cushion is not None and cushion < limits.min_cushion_pct
+    )
+    if cushion_blocked:
+        logger.warning(
+            "🚨 [LIVE CUSHION GUARD] IBKR account cushion is %.1f%% (minimum required: %.1f%%). "
+            "Halting opening of new positions.",
+            cushion * 100,
+            limits.min_cushion_pct * 100,
+        )
+
     bp_used = sum(t.buying_power for t in ledger.open_trades())
     portfolio = PortfolioInput(
         net_liq=net_liq,
         bp_used=bp_used,
         positions_by_symbol=ledger.positions_by_symbol(),
+        cushion=cushion,
+        is_live=is_live_mode,
     )
 
-    # 4. Market Context (IV Rank for universe via IBKR 1-year historical IV + cache)
-    metrics_session = client.data_ib or client.active_trading_ib
-    scheduler_interval = float(getattr(runtime, "scheduler_interval_seconds", 300.0))
-    max_retry_seconds = min(300.0, scheduler_interval)
-    metrics, regime = await gather_context(
-        metrics_session,
-        params,
-        universe,
-        max_retry_seconds=max_retry_seconds,
-    )
-    top_symbols = rank_universe(metrics, params.universe_top_n)
-    logger.info(
-        "Universe scan: %d symbols configured, %d top symbols selected by IV rank (%s)",
-        len(universe),
-        len(top_symbols),
-        ", ".join(top_symbols) if top_symbols else "none",
-    )
-    candidates = await generate_candidates(
-        client, metrics_session, params, top_symbols, metrics=metrics
-    )
-    logger.info(
-        "Candidate generation complete: %d candidate trades found across %d symbols",
-        len(candidates),
-        len(top_symbols),
-    )
+    if cushion_blocked:
+        top_symbols = []
+        candidates = []
+        regime = {"cushion": cushion, "cushion_guard_active": True}
+    else:
+        # 4. Market Context (IV Rank for universe via IBKR 1-year historical IV + cache)
+        metrics_session = client.data_ib or client.active_trading_ib
+        scheduler_interval = float(getattr(runtime, "scheduler_interval_seconds", 300.0))
+        max_retry_seconds = min(300.0, scheduler_interval)
+        metrics, regime = await gather_context(
+            metrics_session,
+            params,
+            universe,
+            max_retry_seconds=max_retry_seconds,
+        )
+        top_symbols = rank_universe(metrics, params.universe_top_n)
+        logger.info(
+            "Universe scan: %d symbols configured, %d top symbols selected by IV rank (%s)",
+            len(universe),
+            len(top_symbols),
+            ", ".join(top_symbols) if top_symbols else "none",
+        )
+        candidates = await generate_candidates(
+            client, metrics_session, params, top_symbols, metrics=metrics
+        )
+        logger.info(
+            "Candidate generation complete: %d candidate trades found across %d symbols",
+            len(candidates),
+            len(top_symbols),
+        )
 
     # 5. Decision cycle (LLM / Guardrails)
     result = await run_cycle(candidates, portfolio, regime, params, limits)
