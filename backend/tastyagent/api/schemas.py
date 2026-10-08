@@ -160,6 +160,7 @@ class TastytradeWatchlist(BaseModel):
 class SchedulerConfig(BaseModel):
     interval_seconds: float
     market_hours_only: bool
+    open_delay_minutes: int = 15
 
 
 class IBKRConfig(BaseModel):
@@ -228,6 +229,7 @@ class SettingsUpdate(BaseModel):
     working_capital: float | None = None
     scheduler_interval_seconds: float | None = None
     scheduler_market_hours_only: bool | None = None
+    scheduler_open_delay_minutes: int | None = None
     auto_start_scheduler: bool | None = None
     strategy: dict | None = None
     risk: dict | None = None

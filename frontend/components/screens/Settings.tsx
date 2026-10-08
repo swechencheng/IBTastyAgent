@@ -33,6 +33,7 @@ type Form = {
   useCustomCapital: boolean;
   working_capital: number;
   intervalMin: number;
+  openDelayMin: number;
   marketHours: boolean;
   autoStartScheduler: boolean;
 
@@ -112,6 +113,7 @@ function fromSettings(sData: SettingsT): Form {
     useCustomCapital: sData.use_custom_working_capital ?? true,
     working_capital: sData.working_capital ?? 10000,
     intervalMin: Math.round(n(sData.scheduler?.interval_seconds, 300) / 60),
+    openDelayMin: n(sData.scheduler?.open_delay_minutes, 15),
     marketHours: !!sData.scheduler?.market_hours_only,
     autoStartScheduler: !!(sy.auto_start_scheduler ?? sData.auto_start_scheduler),
 
@@ -176,6 +178,7 @@ function toPayload(f: Form): SettingsUpdate {
     working_capital: f.working_capital,
     scheduler_interval_seconds: f.intervalMin * 60,
     scheduler_market_hours_only: f.marketHours,
+    scheduler_open_delay_minutes: f.openDelayMin,
     auto_start_scheduler: f.autoStartScheduler,
     strategy: {
       min_iv_rank: f.minIvr / 100,
@@ -539,6 +542,9 @@ export default function Settings({
               </Field>
               <Field label="Cycle interval" help="How often the loop ticks while Auto scheduler is active (min 30s)." unit="min">
                 <NInput value={form.intervalMin} onChange={(v) => set("intervalMin", v)} />
+              </Field>
+              <Field label="Market open delay" help="Wait N minutes after market open (09:30 ET) before making the first automated decision of the day (allows IV and spreads to stabilize)." unit="min">
+                <NInput value={form.openDelayMin} onChange={(v) => set("openDelayMin", v)} />
               </Field>
               <Field label="Market hours only" help="When ON, the scheduler won't fire outside regular US market hours.">
                 <Switch checked={form.marketHours} onCheckedChange={(v) => set("marketHours", v)} aria-label="Market hours only" />

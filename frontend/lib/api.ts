@@ -154,10 +154,15 @@ export const importWatchlist = (symbols: string[], source: string) =>
   post("/api/watchlist/import", { symbols, source });
 
 export const runCycle = () => post("/api/cycle/run");
-export const startScheduler = (interval_seconds?: number, market_hours_only?: boolean) => {
+export const startScheduler = (
+  interval_seconds?: number,
+  market_hours_only?: boolean,
+  open_delay_minutes?: number,
+) => {
   const body: Record<string, unknown> = {};
   if (interval_seconds !== undefined) body.interval_seconds = interval_seconds;
   if (market_hours_only !== undefined) body.market_hours_only = market_hours_only;
+  if (open_delay_minutes !== undefined) body.open_delay_minutes = open_delay_minutes;
   return post("/api/scheduler/start", Object.keys(body).length > 0 ? body : undefined);
 };
 export const stopScheduler = () => post("/api/scheduler/stop");
@@ -166,6 +171,7 @@ export const stopScheduler = () => post("/api/scheduler/stop");
 export interface SchedulerConfig {
   interval_seconds: number;
   market_hours_only: boolean;
+  open_delay_minutes?: number;
 }
 
 export interface IBKRConfig {
@@ -229,6 +235,7 @@ export interface SettingsUpdate {
   working_capital?: number;
   scheduler_interval_seconds?: number;
   scheduler_market_hours_only?: boolean;
+  scheduler_open_delay_minutes?: number;
   auto_start_scheduler?: boolean;
   strategy?: Record<string, number | boolean>;
   risk?: Record<string, number | boolean>;

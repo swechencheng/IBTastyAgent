@@ -612,6 +612,9 @@ def create_app(
                         _tick,
                         interval_seconds=lambda: app.state.runtime.scheduler_interval_seconds,
                         market_hours_only=lambda: app.state.runtime.scheduler_market_hours_only,
+                        open_delay_minutes=lambda: getattr(
+                            app.state.runtime, "scheduler_open_delay_minutes", 15
+                        ),
                         stop=stop,
                         wake_event=wake,
                         get_last_tick_time=lambda: getattr(
@@ -653,6 +656,12 @@ def create_app(
         if "market_hours_only" in body and body["market_hours_only"] is not None:
             rt.scheduler_market_hours_only = bool(body["market_hours_only"])
             _sync_env({"scheduler_market_hours_only": rt.scheduler_market_hours_only})
+        if "open_delay_minutes" in body and body["open_delay_minutes"] is not None:
+            rt.scheduler_open_delay_minutes = max(0, int(body["open_delay_minutes"]))
+            _sync_env({"scheduler_open_delay_minutes": rt.scheduler_open_delay_minutes})
+        if "scheduler_open_delay_minutes" in body and body["scheduler_open_delay_minutes"] is not None:
+            rt.scheduler_open_delay_minutes = max(0, int(body["scheduler_open_delay_minutes"]))
+            _sync_env({"scheduler_open_delay_minutes": rt.scheduler_open_delay_minutes})
 
         if not scheduler_running():
             from ..scheduler import run_loop
@@ -668,6 +677,9 @@ def create_app(
                     _tick,
                     interval_seconds=lambda: app.state.runtime.scheduler_interval_seconds,
                     market_hours_only=lambda: app.state.runtime.scheduler_market_hours_only,
+                    open_delay_minutes=lambda: getattr(
+                        app.state.runtime, "scheduler_open_delay_minutes", 15
+                    ),
                     stop=stop,
                     wake_event=wake,
                     get_last_tick_time=lambda: getattr(
@@ -886,6 +898,7 @@ def create_app(
             scheduler=SchedulerConfig(
                 interval_seconds=rt.scheduler_interval_seconds,
                 market_hours_only=rt.scheduler_market_hours_only,
+                open_delay_minutes=getattr(rt, "scheduler_open_delay_minutes", 15),
             ),
             strategy=asdict(rt.strategy),
             risk=risk,
@@ -928,6 +941,10 @@ def create_app(
                 app.state.scheduler_wake.set()
         if req.scheduler_market_hours_only is not None:
             rt.scheduler_market_hours_only = req.scheduler_market_hours_only
+            if getattr(app.state, "scheduler_wake", None) is not None:
+                app.state.scheduler_wake.set()
+        if req.scheduler_open_delay_minutes is not None:
+            rt.scheduler_open_delay_minutes = max(0, int(req.scheduler_open_delay_minutes))
             if getattr(app.state, "scheduler_wake", None) is not None:
                 app.state.scheduler_wake.set()
         if req.auto_start_scheduler is not None:
@@ -1156,6 +1173,7 @@ def _default_app() -> FastAPI:
         risk=settings.risk_limits(),
         scheduler_interval_seconds=settings.scheduler_interval_seconds,
         scheduler_market_hours_only=settings.scheduler_market_hours_only,
+        scheduler_open_delay_minutes=settings.scheduler_open_delay_minutes,
         auto_start_scheduler=settings.auto_start_scheduler,
         ibkr_walk_step=settings.ibkr_walk_step,
         ibkr_walk_interval=settings.ibkr_walk_interval,

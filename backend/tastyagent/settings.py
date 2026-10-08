@@ -214,7 +214,6 @@ class Settings(BaseSettings):
     )
     working_capital: float = Field(default=10_000.0, alias="TASTYAGENT_WORKING_CAPITAL")
 
-    # Scheduler settings
     scheduler_interval_seconds: float = Field(
         default=300.0,
         alias="TASTYAGENT_SCHEDULER_INTERVAL_SECONDS",
@@ -222,6 +221,11 @@ class Settings(BaseSettings):
     scheduler_market_hours_only: bool = Field(
         default=True,
         alias="TASTYAGENT_SCHEDULER_MARKET_HOURS_ONLY",
+    )
+    scheduler_open_delay_minutes: int = Field(
+        default=15,
+        alias="TASTYAGENT_SCHEDULER_OPEN_DELAY_MINUTES",
+        description="Minutes to wait after market open (9:30 ET) before making the first automated decision of the day (for IV stabilization).",
     )
     auto_start_scheduler: bool = Field(
         default=False,
@@ -337,6 +341,17 @@ def persist_settings_to_env(
             (
                 "TASTYAGENT_SCHEDULER_MARKET_HOURS_ONLY",
                 "true" if updates["scheduler_market_hours_only"] else "false",
+            )
+        )
+
+    if (
+        "scheduler_open_delay_minutes" in updates
+        and updates["scheduler_open_delay_minutes"] is not None
+    ):
+        key_value_pairs.append(
+            (
+                "TASTYAGENT_SCHEDULER_OPEN_DELAY_MINUTES",
+                str(updates["scheduler_open_delay_minutes"]),
             )
         )
 
