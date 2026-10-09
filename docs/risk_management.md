@@ -17,7 +17,7 @@ IBTastyAgent categorizes all options strategies into two fundamental risk paradi
 | **Max Potential Loss** | Unlimited (Call side / Strangle) or Spot to 0 (Put side) | Strictly capped by protective long wing:<br>$\text{Max Loss} = (\text{Strike Width} - \text{Credit}) \times 100 \times \text{Contracts}$ |
 | **Margin / Buying Power** | Calculated dynamically by IBKR (~20% notional underlying) | Equal to maximum loss ($\text{Width} - \text{Credit}$) |
 | **Probability of Profit (PoP)** | Higher (~68%–84% at 16Δ–24Δ) | Moderate (~65%–75% at 16Δ short / 5Δ long) |
-| **Core Management Rule** | **Take profit early at 50%**; roll untested side when tested ($\ge 0.45\Delta$); roll out at 21 DTE for credit; **never roll for a debit**. | **Take profit dynamically** at $\min(50\% \text{ credit},\; \frac{1}{3} \text{ width})$; shift untested wings on Iron Condors; **hold single spreads**; exit cleanly at 21 DTE. |
+| **Core Management Rule** | **Take profit early at 50%**; roll untested side when tested ($\ge 0.45\Delta$); roll out at 21 DTE for credit; **never roll for a debit**. | **Take profit dynamically** at $\min(0.50 \times \text{Credit},\; \frac{1}{3} \times \text{Width})$; shift untested wings on Iron Condors; **hold single spreads**; exit cleanly at 21 DTE. |
 
 ---
 
@@ -94,29 +94,29 @@ Position Evaluation (Mark & Greeks Updated)
 
 ### 4.1. Undefined-Risk: 50% Profit Target
 For **Short Strangles**, **Naked Puts**, **Naked Calls**, and **Short Straddles**:
-* **Target Formula**:
-  $$\text{Target Profit Dollars} = 50\% \times \text{Entry Credit}$$
-* **Closing Debit**:
-  $$\text{TP Limit Price} = \text{Entry Credit} \times (1 - 0.50) = 0.50 \times \text{Entry Credit}$$
+* **Target Formula**: $\text{Target Profit Dollars} = 0.50 \times \text{Entry Credit}$
+* **Closing Debit**: $\text{TP Limit Price} = \text{Entry Credit} \times (1 - 0.50) = 0.50 \times \text{Entry Credit}$
 * **Rationale**: Research by tastytrade proves that closing undefined-risk trades at 50% max profit significantly elevates overall win rate (~85%+), curtails average days in trade, and eliminates late-cycle tail risk.
 
 ### 4.2. Defined-Risk: Dynamic 50% Credit vs. 1/3 Strike Width Rule
 For **Put Credit Spreads**, **Call Credit Spreads**, and **Iron Condors**, the agent executes a **dynamic dual-target minimum algorithm** ([`backend/tastyagent/strategy/exits.py`](file:///Users/chencheng.zhang/workspace/trading/TastyAgent/backend/tastyagent/strategy/exits.py#L55-L81)):
-$$\text{Target Profit Dollars} = \min\left(50\% \times \text{Entry Credit},\; \frac{1}{3} \times \text{Strike Width} \times 100 \times \text{Contracts}\right)$$
+
+$$
+\text{Target Profit Dollars} = \min\left(0.50 \times \text{Entry Credit},\; \frac{1}{3} \times \text{Strike Width} \times 100 \times \text{Contracts}\right)
+$$
 
 * **Case 1: Standard Spread ($5 width, collected $2.40 credit)**:
-  - 50% of Credit = $\$1.20$
-  - 1/3 of Spread Width = $\$1.67$
-  - **Selected Target** = $\min(\$1.20, \$1.67) = \mathbf{\$1.20}$ (50% credit target).
+  - 50% of Credit = $1.20
+  - 1/3 of Spread Width = $1.67
+  - **Selected Target** = $\min(1.20, 1.67) = \mathbf{1.20}$ ($1.20, based on 50% credit target).
 * **Case 2: Wide Spread / Rich Premium ($5 width, collected $3.60 credit)**:
-  - 50% of Credit = $\$1.80$
-  - 1/3 of Spread Width = $\$1.67$
-  - **Selected Target** = $\min(\$1.80, \$1.67) = \mathbf{\$1.67}$ (1/3 width profit target).
+  - 50% of Credit = $1.80
+  - 1/3 of Spread Width = $1.67
+  - **Selected Target** = $\min(1.80, 1.67) = \mathbf{1.67}$ ($1.67, based on 1/3 width profit target).
 * **Rationale**: Defined-risk spreads with wide strikes or high credits should not remain exposed to late-cycle reversals once they have achieved 1/3 of the spread width.
 
 ### 4.3. Pre-Attached GTC Orders & Auto-Healing Audit
-* **Instant Submission**: When an opening combo fills, [`IBKRPlacer`](file:///Users/chencheng.zhang/workspace/trading/TastyAgent/backend/tastyagent/ibkr/placer.py) automatically places a Good-'Til-Canceled (GTC) limit order at the computed take-profit price:
-  $$\text{Debit Limit} = \text{Fill Credit} - \text{Target Profit}$$
+* **Instant Submission**: When an opening combo fills, [`IBKRPlacer`](file:///Users/chencheng.zhang/workspace/trading/TastyAgent/backend/tastyagent/ibkr/placer.py) automatically places a Good-'Til-Canceled (GTC) limit order at the computed take-profit price: $\text{Debit Limit} = \text{Fill Credit} - \text{Target Profit}$.
 * **Continuous Auto-Healing**: Every decision cycle executes `audit_take_profit_orders` in [`exit_manager.py`](file:///Users/chencheng.zhang/workspace/trading/TastyAgent/backend/tastyagent/execution/exit_manager.py). If an open position lacks a working GTC Take-Profit order on IBKR, the agent automatically generates and submits a replacement GTC order.
 
 ---
@@ -147,15 +147,14 @@ When implied volatility collapses abruptly after entry, waiting for the full tar
 ### 6.1. Undefined-Risk Handling (Roll Out to ~45 DTE)
 * The agent searches the option chain for the next standard cycle closest to 45 DTE (range 30–55 DTE).
 * Strikes are re-centered to target delta (16Δ–18Δ) based on the current spot price.
-* **The Net Credit Mandate**:
-  $$\text{New Cycle Credit} \ge \text{Cost to Close Old Cycle}$$
+* **The Net Credit Mandate**: $\text{New Cycle Credit} \ge \text{Cost to Close Old Cycle}$
   - **Credit Available**: Close the old trade and simultaneously open the new trade (recorded as a roll event in the ledger).
-  - **No Credit Available**: If adverse movement prevents rolling for a net credit, the agent **closes the trade cleanly (`no credit roll; closed`)**, refusing to pay a debit.
+  - **No Credit Available**: If adverse movement prevents rolling for a net credit, the agent **closes the trade cleanly** (`"no credit roll; closed"`), refusing to pay a debit.
 
 ### 6.2. Defined-Risk Handling (The Clean Exit Dilemma)
 * For **vertical spreads**, rolling out to the next month almost always requires paying a **net debit** because buying the new protective long wing costs more than the decay of the existing short wing.
 * **The Rule**: If a net credit roll cannot be established:
-  $$\mathbf{Action} = \mathbf{CLOSE} \quad (\text{“21 DTE: no credit roll; closed”})$$
+  - **Action: CLOSE** (`"21 DTE: no credit roll; closed"`)
 * Defined-risk positions are **cleanly closed out at 21 DTE** to eliminate expiration-week gamma risk, never paying debits to prolong losing spreads.
 
 ---
@@ -169,26 +168,24 @@ When a short option leg's absolute delta reaches or exceeds **0.45** (`tested_de
 * **Execution**:
   - **Underlying Rallies (Call Tested, $\Delta_{\text{call}} \ge 0.45$)**: Keep short call intact. Buy back short put and roll the Short Put **UP** towards spot (new delta ~18Δ).
   - **Underlying Drops (Put Tested, $\Delta_{\text{put}} \ge 0.45$)**: Keep short put intact. Buy back short call and roll the Short Call **DOWN** towards spot (new delta ~18Δ).
-* **The Strict No-Inversion Rule**:
-  $$\text{New Put Strike} < \text{Short Call Strike} \quad \text{and} \quad \text{New Call Strike} > \text{Short Put Strike}$$
-  The agent **strictly forbids inverted strangles** (where put strike exceeds call strike), ensuring positive theta and avoiding double-sided intrinsic exposure.
-* **Hold Fallback**: If rolling the untested leg does not generate a net credit, the agent does **NOT** force a close. It holds the trade (`ExitOutcome: hold`), waiting for 21 DTE.
+* **The Strict No-Inversion Rule**: $\text{New Put Strike} \lt \text{Short Call Strike} \quad \text{and} \quad \text{New Call Strike} \gt \text{Short Put Strike}$
+  - The agent **strictly forbids inverted strangles** (where put strike exceeds call strike), ensuring positive theta and avoiding double-sided intrinsic exposure.
+* **Hold Fallback**: If rolling the untested leg does not generate a net credit, the agent does **NOT** force a close. It holds the trade (`ExitOutcome: hold`, `"no credit roll; holding"`), waiting for 21 DTE.
 
 ### 7.2. Iron Condor Defense: Roll Untested Vertical Spread Inward
 * **Concept**: An Iron Condor consists of two vertical credit spreads. The safe, decayed spread is rolled inward to collect additional credit.
 * **Execution**:
   - Move the untested short strike closer to spot (~18Δ).
-  - **Width Preservation**: Move the long protective wing in exact tandem to preserve the original spread width:
-    $$\text{New Long Strike} = \text{New Short Strike} \pm \text{Original Width}$$
+  - **Width Preservation**: Move the long protective wing in exact tandem to preserve the original spread width: $\text{New Long Strike} = \text{New Short Strike} \pm \text{Original Width}$.
   - **No-Inversion Rule**: Short put strike must remain below short call strike.
-* **Credit Requirement & Hold Fallback**: Must collect a net credit. If wide bid-ask spreads prevent a credit roll, emit **HOLD** (`no credit roll; holding`).
+* **Credit Requirement & Hold Fallback**: Must collect a net credit. If wide bid-ask spreads prevent a credit roll, the agent emits **HOLD** (`"no credit roll; holding"`).
 
 ### 7.3. Single Vertical Spreads & Naked Options: Firm Hold Policy
 * **Single Vertical Spreads (Put/Call Credit Spread)**:
   - **No Opposite Wing**: There is no decayed wing to monetize.
   - **No Debit Rolls**: Rolling a single spread out or in strikes almost always requires paying a debit or widening risk.
   - **Max Loss Already Capped**: The long wing contractually limits total loss.
-  - **Action**: **HOLD** (`no credit roll; holding`) to allow mean reversion before 21 DTE.
+  - **Action**: **HOLD** (`"no credit roll; holding"`) to allow mean reversion before 21 DTE.
 * **Single Naked Options (Naked Put / Naked Call)**:
   - No opposite wing exists to shift.
   - **Action**: **HOLD** until mean reversion occurs or 21 DTE duration management triggers.
@@ -199,9 +196,8 @@ When a short option leg's absolute delta reaches or exceeds **0.45** (`tested_de
 
 * **Default State**: `params.use_hard_stop = False` (Disabled).
 * **tastytrade Rationale**: Mechanical stop-losses in premium selling trigger during peak implied volatility, locking in losses at the exact bottom/top before mean-reversion. Long-term studies show mechanical stops reduce total strategy expectancy.
-* **When Configured (`use_hard_stop = True`)**:
-  - Stop Threshold:
-    $$\text{Unrealized Loss} \le - \text{stop\_loss\_multiple} \times \text{Entry Credit} \quad (\text{Default: } -2.0\times)$$
+* **When Configured (`params.use_hard_stop = True`)**:
+  - Stop threshold configured via `params.stop_loss_multiple` (default: `2.0`): $\text{Unrealized Loss} \le - \text{Stop-Loss Multiple} \times \text{Entry Credit}$.
   - Triggers an immediate `ExitAction.CLOSE` to cap tail risk during historic market shocks.
 
 ---
@@ -214,9 +210,9 @@ When a short option leg's absolute delta reaches or exceeds **0.45** (`tested_de
 | **Naked Put** | 50% Net Credit | Yes (Table Schedule) | **Hold** (No opposite wing; wait for mean-reversion) | Roll out to 45 DTE for net credit; else Close | $2.0\times$ credit |
 | **Naked Call** | 50% Net Credit | Yes (Table Schedule) | **Hold** (No opposite wing; wait for mean-reversion) | Roll out to 45 DTE for net credit; else Close | $2.0\times$ credit |
 | **Short Straddle** | 50% Net Credit | Yes (Table Schedule) | Evaluated on delta breach; roll to 45 DTE | Roll out to 45 DTE for net credit; else Close | $2.0\times$ credit |
-| **Iron Condor** | $\min(50\% \text{ credit},\; \frac{1}{3} \text{ width})$ | No (Uses 1/3 cap) | Roll Untested Vertical Spread inward (Preserve width; No Inversion; Credit only; else Hold) | Attempt net credit roll; else Close cleanly | Max loss capped by strike width; $2.0\times$ opt. |
-| **Put Credit Spread** | $\min(50\% \text{ credit},\; \frac{1}{3} \text{ width})$ | No (Uses 1/3 cap) | **Hold** (Max loss capped; no debit rolls) | Close cleanly (debit roll avoidance) | Max loss capped by strike width; $2.0\times$ opt. |
-| **Call Credit Spread** | $\min(50\% \text{ credit},\; \frac{1}{3} \text{ width})$ | No (Uses 1/3 cap) | **Hold** (Max loss capped; no debit rolls) | Close cleanly (debit roll avoidance) | Max loss capped by strike width; $2.0\times$ opt. |
+| **Iron Condor** | $\min(0.50 \times \text{Credit},\; \frac{1}{3} \times \text{Width})$ | No (Uses 1/3 cap) | Roll Untested Vertical Spread inward (Preserve width; No Inversion; Credit only; else Hold) | Attempt net credit roll; else Close cleanly | Max loss capped by strike width; $2.0\times$ opt. |
+| **Put Credit Spread** | $\min(0.50 \times \text{Credit},\; \frac{1}{3} \times \text{Width})$ | No (Uses 1/3 cap) | **Hold** (Max loss capped; no debit rolls) | Close cleanly (debit roll avoidance) | Max loss capped by strike width; $2.0\times$ opt. |
+| **Call Credit Spread** | $\min(0.50 \times \text{Credit},\; \frac{1}{3} \times \text{Width})$ | No (Uses 1/3 cap) | **Hold** (Max loss capped; no debit rolls) | Close cleanly (debit roll avoidance) | Max loss capped by strike width; $2.0\times$ opt. |
 
 ---
 

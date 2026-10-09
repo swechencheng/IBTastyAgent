@@ -55,8 +55,8 @@ Position Lifecycle & Isolation ── Strict orderRef tracking · 50% TP monitor
 3. **1-Year Historical IV Metrics (`backend/tastyagent/ibkr/metrics.py`)**:
    - Queries IBKR historical market data via `reqHistoricalDataAsync(contract, durationStr="1 Y", barSizeSetting="1 day", whatToShow="OPTION_IMPLIED_VOLATILITY")`.
    - Computes:
-     - **IV Rank** = $\frac{\text{Current IV} - \text{Min IV}_{52w}}{\text{Max IV}_{52w} - \text{Min IV}_{52w}}$
-     - **IV Percentile** = $\frac{\sum \mathbf{1}(\text{IV}_t < \text{Current IV})}{N}$
+     - **IV Rank** = $\frac{\text{Current IV} - \text{Min IV (52w)}}{\text{Max IV (52w)} - \text{Min IV (52w)}}$
+     - **IV Percentile** = $\frac{\sum \mathbf{1}(\text{IV}_t \lt \text{Current IV})}{N}$
    - Caches calculated metrics into a local SQLite table (`iv_metrics_cache`) with a daily TTL `(symbol, cache_date)` to avoid redundant gateway requests.
 
 4. **Multi-Currency Account & Forex Buying Power (`backend/tastyagent/ibkr/client.py`)**:
@@ -71,12 +71,12 @@ Position Lifecycle & Isolation ── Strict orderRef tracking · 50% TP monitor
 
 6. **Candidate Generation & Hard Guardrails (`backend/tastyagent/strategy/candidates.py`, `guardrails.py`)**:
    - Builds candidate structures: Put Credit Spreads, Call Credit Spreads, Iron Condors, Short Strangles, and Naked Puts.
-   - **Margin Cushion Guard**: In live trading mode (`live_approval`, `live_auto`), account margin cushion must remain $\ge 30\%$ (`TASTYAGENT_MIN_CUSHION_PCT`). If cushion falls below 30%, all new trade openings are halted immediately.
+   - **Margin Cushion Guard**: In live trading mode (`live_approval`, `live_auto`), account margin cushion must remain $\ge 30$% (`TASTYAGENT_MIN_CUSHION_PCT`). If cushion falls below 30%, all new trade openings are halted immediately.
    - **1/3 Strike Width Rule**: On defined-risk spreads and iron condors, the collected credit must be at least $\frac{1}{3}$ (33.3%) of the spread width (e.g. at least $1.67 credit on a $5 spread).
    - **Delta Targets**: Short legs targeted near 16–24Δ (max allowable delta cap 25Δ); long wings targeted near 5Δ.
    - **Expiration**: 30–55 DTE (target 45 DTE).
-   - **Liquidity**: Bid-ask spread width ratio $\le 10\%$ ($\le 50\%$ in sandbox).
-   - **Minimum IV Rank**: $\ge 30\%$.
+   - **Liquidity**: Bid-ask spread width ratio $\le 10$% ($\le 50$% in sandbox).
+   - **Minimum IV Rank**: $\ge 30$%.
    - **Earnings Blackout**: Eliminates underlyings announcing earnings within 7 days.
 
 7. **Adaptive LLM Selection (`backend/tastyagent/decision/llm.py`)**:
@@ -100,7 +100,7 @@ Position Lifecycle & Isolation ── Strict orderRef tracking · 50% TP monitor
 
 ### 📚 Risk Management & Position Lifecycle Documentation
 For in-depth mathematical formulations, holding schedules, decision trees, and code-level walkthroughs across all strategy types, see the comprehensive guide:
-- [**Risk Management & Position Lifecycle Guide**](docs/risk_management.md) — Unified reference covering undefined-risk strategies (Short Strangles, Naked Puts/Calls, Straddles) and defined-risk strategies (Iron Condors, Vertical Spreads), detailing 50% TP vs $\min(50\%, \frac{1}{3}\text{ width})$ dynamic targets, ahead-of-pace milestone holding tables, 21-DTE duration management, untested side defenses, account cushion guardrails, and emergency stops.
+- [**Risk Management & Position Lifecycle Guide**](docs/risk_management.md) — Unified reference covering undefined-risk strategies (Short Strangles, Naked Puts/Calls, Straddles) and defined-risk strategies (Iron Condors, Vertical Spreads), detailing 50% TP vs $\min(0.50 \times \text{credit},\; \frac{1}{3} \times \text{width})$ dynamic targets, ahead-of-pace milestone holding tables, 21-DTE duration management, untested side defenses, account cushion guardrails, and emergency stops.
 
 ---
 
