@@ -96,7 +96,11 @@ Position Lifecycle & Isolation ── Strict orderRef tracking · 50% TP monitor
 10. **Position Lifecycle Management & Strict Isolation (`backend/tastyagent/execution/exit_manager.py`, `backend/tastyagent/portfolio/ledger.py`)**:
     - **Isolation**: Tags all orders and positions with unique identifiers: `orderRef="TastyAgent_{trade_id}"`. The agent never touches or interferes with manual positions or trades from other strategies on the account.
     - **Audit**: Continuously audits open IBTastyAgent positions; if any position lacks an active take-profit order, an alert is surfaced immediately.
-    - **Defense**: Monitors positions at 21 DTE for standard rolling, or rolls the untested side when a short strike is breached.
+    - **Defense & Exit Execution**: Evaluates open positions every cycle using an unyielding priority hierarchy (Profit Target $\to$ Ahead-of-Pace $\to$ 21 DTE $\to$ Tested Delta $\to$ Hold).
+
+### 📚 Risk Management & Position Lifecycle Documentation
+For in-depth mathematical formulations, holding schedules, decision trees, and code-level walkthroughs across all strategy types, see the comprehensive guide:
+- [**Risk Management & Position Lifecycle Guide**](docs/risk_management.md) — Unified reference covering undefined-risk strategies (Short Strangles, Naked Puts/Calls, Straddles) and defined-risk strategies (Iron Condors, Vertical Spreads), detailing 50% TP vs $\min(50\%, \frac{1}{3}\text{ width})$ dynamic targets, ahead-of-pace milestone holding tables, 21-DTE duration management, untested side defenses, account cushion guardrails, and emergency stops.
 
 ---
 
@@ -255,5 +259,7 @@ backend/
 │   ├── risk/                              # Portfolio safety limits, cushion guards, and capital guardrails
 │   ├── scheduler.py                       # Market hours loop, open delay window gating, and sleep control
 │   └── strategy/                          # Delta/DTE guardrails, 1/3 width rule, candidate builders, and sizing
+docs/
+└── risk_management.md                     # Comprehensive unified risk management, exit hierarchy, and defense guide
 frontend/                                  # Next.js dashboard with custom dark theme design system
 ```
