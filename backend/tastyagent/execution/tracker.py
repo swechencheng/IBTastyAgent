@@ -42,6 +42,132 @@ def reconcile_fills(ledger: Ledger, order_status: dict[str, str]) -> None:
             ledger.cancel_trade(trade, reason=f"broker: {status}")
 
 
+def reconcile_closing_orders(
+    ledger: Ledger,
+    ib_trades: list[Any],
+    active_ib: Any = None,
+) -> int:
+    """Close OPEN trades in ledger if their closing orders have filled on the broker."""
+    closed_count = 0
+    trades_by_ref: dict[str, Any] = {}
+    trades_by_id: dict[str, Any] = {}
+    for t in ib_trades:
+        order = getattr(t, "order", None)
+        if order is not None:
+            ref = getattr(order, "orderRef", "")
+            if ref:
+                trades_by_ref[ref] = t
+            oid = getattr(order, "orderId", None)
+            if oid:
+                trades_by_id[str(oid)] = t
+
+    for trade in ledger.open_trades():
+        if trade.status is not TradeStatus.OPEN:
+            continue
+
+        close_ref = f"TastyAgent_CLOSE_{trade.id}"
+        tp_ref = f"TastyAgent_TP_{trade.id}"
+
+        close_trade = trades_by_ref.get(close_ref)
+        tp_trade = trades_by_ref.get(tp_ref) or (
+            trades_by_id.get(str(trade.tp_order_id)) if trade.tp_order_id else None
+        )
+
+        filled_trade = None
+        exit_reason = ""
+        is_tp = False
+
+        if (
+            close_trade
+            and getattr(getattr(close_trade, "orderStatus", None), "status", "")
+            in FILLED
+        ):
+            filled_trade = close_trade
+            exit_reason = "Closed via broker close order"
+        elif (
+            tp_trade
+            and getattr(getattr(tp_trade, "orderStatus", None), "status", "") in FILLED
+        ):
+            filled_trade = tp_trade
+            exit_reason = "Take-profit order filled"
+            is_tp = True
+
+        if filled_trade is not None:
+            exit_debit = 0.0
+            closed_at = None
+            fills = getattr(filled_trade, "fills", [])
+            bag_fill = next(
+                (
+                    f
+                    for f in fills
+                    if getattr(getattr(f, "contract", None), "secType", "") == "BAG"
+                ),
+                None,
+            )
+            if bag_fill is not None:
+                p = getattr(getattr(bag_fill, "execution", None), "price", 0.0)
+                exit_debit = abs(float(p)) * 100.0 * trade.contracts
+                closed_at = getattr(getattr(bag_fill, "execution", None), "time", None)
+            elif fills:
+                leg_debit = 0.0
+                for f in fills:
+                    price = float(getattr(getattr(f, "execution", None), "price", 0.0))
+                    side = (
+                        str(getattr(getattr(f, "execution", None), "side", ""))
+                        .strip()
+                        .upper()
+                    )
+                    if side == "BOT":
+                        leg_debit += price
+                    else:
+                        leg_debit -= price
+                    if closed_at is None:
+                        closed_at = getattr(
+                            getattr(f, "execution", None), "time", None
+                        )
+                exit_debit = abs(leg_debit) * 100.0 * trade.contracts
+            else:
+                exit_debit = (
+                    trade.take_profit_debit
+                    if is_tp and trade.take_profit_debit is not None
+                    else (trade.current_cost_to_close or trade.entry_credit)
+                )
+
+            # Cancel remaining TP order if this was a manual/defensive close
+            if not is_tp and trade.tp_order_id and active_ib is not None:
+                try:
+                    for ot in active_ib.openTrades():
+                        if str(ot.order.orderId) == str(
+                            trade.tp_order_id
+                        ) or getattr(ot.order, "orderRef", "") == tp_ref:
+                            active_ib.cancelOrder(ot.order)
+                            logger.info(
+                                "Cancelled orphaned TP order #%s for closed Trade #%s",
+                                trade.tp_order_id,
+                                trade.id,
+                            )
+                except Exception as e:
+                    logger.debug("Failed to cancel TP order: %s", e)
+
+            ledger.close_trade(
+                trade,
+                exit_debit=exit_debit,
+                exit_reason=exit_reason,
+                closed_at=closed_at,
+            )
+            closed_count += 1
+            logger.info(
+                "Trade #%s (%s %s) reconciled as CLOSED (%s, debit: $%.2f)",
+                trade.id,
+                trade.symbol,
+                trade.strategy,
+                exit_reason,
+                exit_debit,
+            )
+
+    return closed_count
+
+
 def reconcile_positions_from_broker(ledger: Ledger, positions: list[Any]) -> int:
     """Transition WORKING trades to OPEN if all their option legs exist in broker positions.
 
@@ -173,8 +299,9 @@ async def sync_positions_and_marks(
         ib_trades = active_ib.trades()
         status_map = {str(t.order.orderId): t.orderStatus.status for t in ib_trades}
         reconcile_fills(ledger, status_map)
+        reconcile_closing_orders(ledger, ib_trades, active_ib)
     except Exception as e:
-        logger.debug("reconcile_fills failed: %s", e)
+        logger.debug("reconcile_fills / reconcile_closing_orders failed: %s", e)
 
     # 2. Reconcile working trades against current positions
     try:

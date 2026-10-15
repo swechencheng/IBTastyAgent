@@ -496,7 +496,21 @@ async def run_one_cycle(
                 )
                 return None
             await placer.close(trade, mark.cost_to_close)
-            new_order_id = await placer.open_candidate(new_cand, trade.contracts)
+            try:
+                new_order_id = await placer.open_candidate(new_cand, trade.contracts)
+            except Exception as e:
+                logger.error(
+                    "Roll close executed for Trade #%s, but opening replacement failed: %s. Marking original trade as closed.",
+                    trade.id,
+                    e,
+                )
+                ledger.close_trade(
+                    trade,
+                    exit_debit=mark.cost_to_close,
+                    exit_reason=f"Roll close filled; replacement open failed: {e}",
+                )
+                return None
+
             return RollResult(
                 new_candidate=new_cand,
                 contracts=trade.contracts,

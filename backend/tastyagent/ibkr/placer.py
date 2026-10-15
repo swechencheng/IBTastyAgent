@@ -133,7 +133,11 @@ class IBKRPlacer:
             self.walk_interval,
         )
 
-        order_ref = f"TastyAgent_{trade.id}"
+        order_ref = (
+            f"TastyAgent_{trade.id}"
+            if trade.id is not None
+            else f"TastyAgent_ROLL_{trade.symbol}"
+        )
 
         # 4. Optional Margin Preflight
         preflight_order = build_opening_credit_order(
@@ -370,6 +374,16 @@ class IBKRPlacer:
         combo = build_combo_contract(trade.symbol, leg_pairs)
         debit_per_share = round(float(cost_to_close) / (100 * trade.contracts), 2)
         order_ref = f"TastyAgent_CLOSE_{trade.id}"
+
+        # Cancel any active TP order on broker for this trade
+        if trade.tp_order_id:
+            try:
+                for ot in self.ib.openTrades():
+                    if str(ot.order.orderId) == str(trade.tp_order_id) or getattr(ot.order, "orderRef", "") == f"TastyAgent_TP_{trade.id}":
+                        self.ib.cancelOrder(ot.order)
+                        logger.info("  Canceled existing TP order #%s for Trade #%s", trade.tp_order_id, trade.id)
+            except Exception as e:
+                logger.warning("  Failed to cancel TP order #%s for Trade #%s: %s", trade.tp_order_id, trade.id, e)
 
         order = build_manual_close_order(
             trade.contracts,

@@ -173,3 +173,100 @@ async def test_sync_positions_and_marks():
     snap = s.query(EquitySnapshot).first()
     assert snap is not None
     assert snap.unrealized_pnl == 100.0
+
+
+@dataclass
+class FakeOrder:
+    orderId: int
+    orderRef: str
+
+
+@dataclass
+class FakeOrderStatus:
+    status: str
+
+
+@dataclass
+class FakeExecution:
+    price: float
+    time: date | None = None
+    side: str = "SLD"
+
+
+@dataclass
+class FakeFill:
+    contract: FakeContract
+    execution: FakeExecution
+
+
+@dataclass
+class FakeIBTrade:
+    order: FakeOrder
+    orderStatus: FakeOrderStatus
+    fills: list = None
+
+    def __post_init__(self):
+        if self.fills is None:
+            self.fills = []
+
+
+def test_reconcile_closing_orders_manual_close():
+    from tastyagent.execution.tracker import reconcile_closing_orders
+
+    s = in_memory_session()
+    lg = Ledger(s)
+    c = make_candidate(symbol="TLT", max_profit=59.0)
+    t = lg.record_planned(c, 1, "test close", TradingMode.SANDBOX)
+    lg.mark_open(t)
+    t.tp_order_id = "551"
+    s.commit()
+    assert t.status is TradeStatus.OPEN
+
+    # Simulated filled CLOSE combo order (BAG)
+    fake_trade = FakeIBTrade(
+        order=FakeOrder(orderId=596, orderRef=f"TastyAgent_CLOSE_{t.id}"),
+        orderStatus=FakeOrderStatus(status="Filled"),
+        fills=[
+            FakeFill(
+                contract=FakeContract("TLT", "", 0.0, "", secType="BAG")
+                if hasattr(FakeContract, "secType")
+                else FakeContract("TLT", "", 0.0, ""),
+                execution=FakeExecution(price=-0.88, time=None, side="SLD"),
+            )
+        ],
+    )
+    # Set secType on contract for BAG check
+    fake_trade.fills[0].contract.secType = "BAG"
+
+    reconciled = reconcile_closing_orders(lg, [fake_trade])
+    assert reconciled == 1
+    assert t.status is TradeStatus.CLOSED
+    assert t.exit_debit == 88.0
+    assert t.realized_pnl == 59.0 - 88.0  # -29.0
+    assert "broker close order" in t.exit_reason
+
+
+def test_reconcile_closing_orders_tp_fill():
+    from tastyagent.execution.tracker import reconcile_closing_orders
+
+    s = in_memory_session()
+    lg = Ledger(s)
+    c = make_candidate(symbol="SPY", max_profit=200.0)
+    t = lg.record_planned(c, 1, "test tp", TradingMode.SANDBOX)
+    lg.mark_open(t)
+    t.tp_order_id = "777"
+    t.take_profit_debit = 100.0
+    s.commit()
+
+    fake_tp = FakeIBTrade(
+        order=FakeOrder(orderId=777, orderRef=f"TastyAgent_TP_{t.id}"),
+        orderStatus=FakeOrderStatus(status="Filled"),
+        fills=[],
+    )
+
+    reconciled = reconcile_closing_orders(lg, [fake_tp])
+    assert reconciled == 1
+    assert t.status is TradeStatus.CLOSED
+    assert t.exit_debit == 100.0
+    assert t.realized_pnl == 100.0
+    assert "Take-profit order filled" in t.exit_reason
