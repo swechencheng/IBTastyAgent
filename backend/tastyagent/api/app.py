@@ -39,6 +39,7 @@ from .schemas import (
     EventFeedItem,
     IBKRConfig,
     KillSwitchRequest,
+    LegOut,
     LLMConfig,
     ModeRequest,
     PnLOut,
@@ -190,21 +191,169 @@ def create_app(
             connection=conn,
         )
 
+    def _format_occ_symbol(
+        symbol: str, expiration: date, option_type: str, strike: float
+    ) -> str:
+        exp_str = (
+            expiration.strftime("%y%m%d")
+            if hasattr(expiration, "strftime")
+            else str(expiration).replace("-", "")[2:8]
+        )
+        right = "P" if str(option_type).lower() == "put" else "C"
+        strike_val = int(round(strike * 1000))
+        return f"{symbol.upper()} {exp_str}{right}{strike_val:08d}"
+
+    def _enrich_trade_out(
+        trade: Trade, portfolio_items: list[Any] | None = None
+    ) -> TradeOut:
+        port_map = {}
+        if portfolio_items:
+            for p in portfolio_items:
+                c = getattr(p, "contract", None)
+                if c is not None:
+                    sym = getattr(c, "symbol", "").upper()
+                    right = getattr(c, "right", "").upper()
+                    strike = round(float(getattr(c, "strike", 0.0)), 2)
+                    exp = str(
+                        getattr(c, "lastTradeDateOrContractMonth", "") or ""
+                    ).replace("-", "")
+                    port_map[(sym, right, strike, exp)] = p
+
+        contracts = trade.contracts or 1
+        combo_avg_price = (
+            round(trade.entry_credit / (100.0 * contracts), 2)
+            if trade.entry_credit
+            else 0.0
+        )
+        combo_mkt_price = (
+            round(trade.current_cost_to_close / (100.0 * contracts), 2)
+            if trade.current_cost_to_close
+            else 0.0
+        )
+        combo_unrealized = trade.unrealized_pnl
+        combo_pnl_pct = (
+            round((combo_unrealized / trade.entry_credit) * 100.0, 2)
+            if trade.entry_credit
+            else 0.0
+        )
+        combo_change_pct = (
+            round(((combo_mkt_price - combo_avg_price) / combo_avg_price) * 100.0, 2)
+            if combo_avg_price > 0
+            else 0.0
+        )
+
+        net_delta = 0.0
+        legs_out = []
+        # Sort legs by strike ascending so legs are consistently ordered
+        sorted_legs = sorted(trade.legs or [], key=lambda l: l.strike)
+        for leg in sorted_legs:
+            right = "P" if leg.option_type.lower() == "put" else "C"
+            strike = round(float(leg.strike), 2)
+            exp_str = str(leg.expiration).replace("-", "")
+            key = (trade.symbol.upper(), right, strike, exp_str)
+            p = port_map.get(key)
+
+            is_sell = "sell" in str(leg.action).lower()
+            pos_size = (
+                -float(leg.quantity * contracts)
+                if is_sell
+                else float(leg.quantity * contracts)
+            )
+
+            occ = _format_occ_symbol(
+                trade.symbol, leg.expiration, leg.option_type, leg.strike
+            )
+            mkt_price = None
+            avg_price = None
+            leg_unrealized = None
+            leg_pnl_pct = None
+            leg_change_pct = None
+            leg_delta = float(leg.delta or 0.0)
+
+            if p is not None:
+                local = getattr(getattr(p, "contract", None), "localSymbol", None)
+                if local:
+                    occ = " ".join(local.split())
+                if getattr(p, "position", None) is not None:
+                    pos_size = float(p.position)
+                if getattr(p, "marketPrice", None) is not None:
+                    mkt_price = round(float(p.marketPrice), 2)
+                if getattr(p, "averageCost", None) is not None and abs(pos_size) > 0:
+                    avg_price = round(float(p.averageCost) / 100.0, 2)
+                if getattr(p, "unrealizedPNL", None) is not None:
+                    leg_unrealized = round(float(p.unrealizedPNL), 2)
+
+                if leg_unrealized is not None and avg_price and avg_price > 0:
+                    cost_basis = abs(pos_size) * avg_price * 100.0
+                    leg_pnl_pct = round((leg_unrealized / cost_basis) * 100.0, 2)
+                elif mkt_price is not None and avg_price and avg_price > 0:
+                    if is_sell:
+                        leg_pnl_pct = round(
+                            ((avg_price - mkt_price) / avg_price) * 100.0, 2
+                        )
+                    else:
+                        leg_pnl_pct = round(
+                            ((mkt_price - avg_price) / avg_price) * 100.0, 2
+                        )
+
+                if mkt_price is not None and avg_price and avg_price > 0:
+                    leg_change_pct = round(
+                        ((mkt_price - avg_price) / avg_price) * 100.0, 2
+                    )
+
+            net_delta += pos_size * leg_delta
+
+            leg_dict = {
+                "option_type": leg.option_type,
+                "strike": leg.strike,
+                "expiration": leg.expiration,
+                "action": leg.action,
+                "quantity": leg.quantity,
+                "delta": leg_delta,
+                "occ_symbol": occ,
+                "position_size": pos_size,
+                "average_price": avg_price,
+                "market_price": mkt_price,
+                "unrealized_pnl": leg_unrealized,
+                "pnl_pct": leg_pnl_pct,
+                "change_pct": leg_change_pct,
+            }
+            legs_out.append(LegOut(**leg_dict))
+
+        trade_out = TradeOut.model_validate(trade)
+        trade_out.legs = legs_out
+        trade_out.net_delta = round(net_delta, 2)
+        trade_out.average_price = combo_avg_price
+        trade_out.market_price = combo_mkt_price
+        trade_out.pnl_pct = combo_pnl_pct
+        trade_out.change_pct = combo_change_pct
+        return trade_out
+
+    def _get_active_portfolio_items() -> list[Any]:
+        if app.state.client and app.state.client.active_trading_ib:
+            try:
+                return list(app.state.client.active_trading_ib.portfolio())
+            except Exception:
+                pass
+        return []
+
     @app.get("/api/trades", response_model=list[TradeOut])
     def trades(s: Session = Depends(get_session)) -> list[TradeOut]:
-        return [TradeOut.model_validate(t) for t in Ledger(s).all_trades()]
+        port = _get_active_portfolio_items()
+        return [_enrich_trade_out(t, port) for t in Ledger(s).all_trades()]
 
     @app.get("/api/positions", response_model=list[TradeOut])
     def positions(s: Session = Depends(get_session)) -> list[TradeOut]:
-        return [TradeOut.model_validate(t) for t in Ledger(s).open_trades()]
+        port = _get_active_portfolio_items()
+        return [_enrich_trade_out(t, port) for t in Ledger(s).open_trades()]
 
     @app.get("/api/trades/closed", response_model=list[TradeOut])
     def closed(s: Session = Depends(get_session)) -> list[TradeOut]:
-        return [TradeOut.model_validate(t) for t in Ledger(s).closed_trades()]
+        return [_enrich_trade_out(t, None) for t in Ledger(s).closed_trades()]
 
     @app.get("/api/approvals", response_model=list[TradeOut])
     def approvals(s: Session = Depends(get_session)) -> list[TradeOut]:
-        return [TradeOut.model_validate(t) for t in Ledger(s).pending_approval()]
+        return [_enrich_trade_out(t, None) for t in Ledger(s).pending_approval()]
 
     @app.get("/api/pnl", response_model=PnLOut)
     def pnl(

@@ -23,6 +23,13 @@ class LegOut(BaseModel):
     action: str
     quantity: int
     delta: float
+    occ_symbol: str | None = None
+    position_size: float | None = None
+    average_price: float | None = None
+    market_price: float | None = None
+    unrealized_pnl: float | None = None
+    pnl_pct: float | None = None
+    change_pct: float | None = None
 
 
 class TradeEventOut(BaseModel):
@@ -59,6 +66,12 @@ class TradeOut(BaseModel):
     created_at: datetime | None = None
     legs: list[LegOut]
     events: list[TradeEventOut] = []
+    # Enhanced combo-level metrics
+    net_delta: float | None = None
+    average_price: float | None = None
+    market_price: float | None = None
+    pnl_pct: float | None = None
+    change_pct: float | None = None
 
     @field_serializer("opened_at", "closed_at", "created_at", when_used="json")
     def serialize_dts(self, v: datetime | None) -> str | None:

@@ -47,6 +47,13 @@ export interface Leg {
   action: string;
   quantity: number;
   delta: number;
+  occ_symbol?: string | null;
+  position_size?: number | null;
+  average_price?: number | null;
+  market_price?: number | null;
+  unrealized_pnl?: number | null;
+  pnl_pct?: number | null;
+  change_pct?: number | null;
 }
 
 export interface TradeEvent {
@@ -77,6 +84,11 @@ export interface Trade {
   created_at: string | null;
   legs: Leg[];
   events: TradeEvent[];
+  net_delta?: number | null;
+  average_price?: number | null;
+  market_price?: number | null;
+  pnl_pct?: number | null;
+  change_pct?: number | null;
 }
 
 export interface EventFeedItem {
@@ -348,3 +360,12 @@ export const fmtPctSigned = (n: number | null | undefined, alreadyPct = false) =
 
 export const fmtPct = (n: number | null | undefined) =>
   n == null ? "—" : `${(n * 100).toFixed(1)}%`;
+
+export const fmtPrice = (n: number | null | undefined) =>
+  n == null ? "—" : `$${n.toFixed(2)}`;
+
+export const fmtSignedDelta = (n: number | null | undefined) => {
+  if (n == null) return "—";
+  const sign = n > 0 ? "+" : n < 0 ? "−" : "";
+  return `${sign}${Math.abs(n).toFixed(2)}`;
+};

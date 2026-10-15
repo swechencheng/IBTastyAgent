@@ -57,7 +57,22 @@ def test_status():
 def test_trades_positions_closed():
     c = sandbox_client()
     assert len(c.get("/api/trades").json()) == 2
-    assert len(c.get("/api/positions").json()) == 1
+    pos = c.get("/api/positions").json()
+    assert len(pos) == 1
+    p0 = pos[0]
+    assert "net_delta" in p0
+    assert "average_price" in p0
+    assert "market_price" in p0
+    assert "pnl_pct" in p0
+    assert "change_pct" in p0
+    assert len(p0["legs"]) > 0
+    leg0 = p0["legs"][0]
+    assert "occ_symbol" in leg0
+    assert "position_size" in leg0
+    assert "average_price" in leg0
+    assert "market_price" in leg0
+    assert "change_pct" in leg0
+    assert "pnl_pct" in leg0
     assert len(c.get("/api/trades/closed").json()) == 1
 
 
