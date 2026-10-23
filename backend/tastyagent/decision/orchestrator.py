@@ -38,6 +38,9 @@ class PortfolioInput:
     consecutive_losses: int = 0
     cushion: float | None = None
     is_live: bool = False
+    losing_symbols: set[str] = field(default_factory=set)
+    spread_bp_used: float = 0.0
+    undefined_bp_used: float = 0.0
 
     @property
     def open_positions(self) -> int:
@@ -128,6 +131,8 @@ async def run_cycle(
     planned: list[PlannedTrade] = []
     rejected: list[tuple[CandidateTrade, str]] = []
     running_bp = portfolio.bp_used
+    running_spread_bp = portfolio.spread_bp_used
+    running_undefined_bp = portfolio.undefined_bp_used
     counts = defaultdict(int, dict(portfolio.positions_by_symbol))
 
     for sel in decision.selections:
@@ -140,7 +145,18 @@ async def run_cycle(
             rejected.append((cand, "guardrail: " + "; ".join(gr.violations)))
             continue
 
-        sizing = size_trade(cand, portfolio.net_liq, running_bp, limits)
+        current_strat_bp = (
+            running_spread_bp
+            if cand.strategy.is_defined_risk
+            else running_undefined_bp
+        )
+        sizing = size_trade(
+            cand,
+            portfolio.net_liq,
+            running_bp,
+            limits,
+            current_strategy_bp_used=current_strat_bp,
+        )
         contracts = min(sel.contracts, sizing.contracts)
         if contracts < 1:
             rejected.append((cand, f"sizing: {sizing.reason}"))
@@ -156,14 +172,27 @@ async def run_cycle(
             consecutive_losses=portfolio.consecutive_losses,
             cushion=portfolio.cushion,
             is_live=portfolio.is_live,
+            losing_symbols=frozenset(portfolio.losing_symbols),
+            spread_bp_used=running_spread_bp,
+            undefined_bp_used=running_undefined_bp,
         )
-        risk = check_new_entry(cand.symbol, incremental_bp, state, limits)
+        risk = check_new_entry(
+            cand.symbol,
+            incremental_bp,
+            state,
+            limits,
+            is_defined_risk=cand.strategy.is_defined_risk,
+        )
         if not risk.ok:
             rejected.append((cand, "risk: " + "; ".join(risk.violations)))
             continue
 
         planned.append(PlannedTrade(cand, contracts, sel.rationale))
         running_bp += incremental_bp
+        if cand.strategy.is_defined_risk:
+            running_spread_bp += incremental_bp
+        else:
+            running_undefined_bp += incremental_bp
         counts[cand.symbol] += 1
 
     return CycleResult(

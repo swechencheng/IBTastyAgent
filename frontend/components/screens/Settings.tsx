@@ -124,7 +124,7 @@ function fromSettings(sData: SettingsT): Form {
     shortDelta: Math.round(n(st.target_short_delta, 0.24) * 100),
     maxShortDelta: Math.round(n(st.max_short_leg_delta, 0.25) * 100),
     spreadLongDelta: Math.round(n(st.spread_long_delta, 0.05) * 100),
-    minCreditWidthRatio: Number((n(st.min_credit_width_ratio, 0.333) * 100).toFixed(1)),
+    minCreditWidthRatio: Number((n(st.min_credit_width_ratio, 0.25) * 100).toFixed(1)),
     testedDelta: Math.round(n(st.tested_delta_threshold, 0.45) * 100),
     topN: n(st.universe_top_n, 15),
     maxBidAskWidthPct: Math.round(n(st.max_bid_ask_width_pct, 0.10) * 100),
@@ -634,15 +634,15 @@ export default function Settings({
                 <NInput value={form.maxShortDelta} onChange={(v) => set("maxShortDelta", v)} />
               </Field>
               <Field
-                label="Spread long wing delta"
-                help="Target delta for buying protective outer wings on defined-risk spreads (default: 5Δ)."
+                label="Spread long wing fallback delta"
+                help="Secondary / fallback delta for protective wings. Long strikes are dynamically chosen to collect 25%-33% of width; this delta serves as tie-breaker or fallback (default: 6Δ)."
                 unit="Δ"
               >
                 <NInput value={form.spreadLongDelta} onChange={(v) => set("spreadLongDelta", v)} />
               </Field>
               <Field
-                label="Min credit / strike width ratio (1/3 Rule)"
-                help="Tastytrade rule for credit spreads & iron condors: minimum net credit collected as a % of strike width (e.g. 33.3% requires ≥$1.67 credit on a $5 spread)."
+                label="Min credit / strike width ratio (25%-33% Rule)"
+                help="Tastytrade rule for credit spreads & iron condors: minimum net credit collected as a % of strike width (e.g. 25.0% requires ≥$1.25 credit on a $5 spread; index call spreads allow 20%)."
                 unit="%"
               >
                 <NInput value={form.minCreditWidthRatio} onChange={(v) => set("minCreditWidthRatio", v)} step={0.5} />

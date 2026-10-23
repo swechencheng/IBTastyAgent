@@ -18,7 +18,14 @@ TODAY = date(2026, 1, 1)
 
 def test_pick_expiration_nearest_in_window():
     exps = [TODAY + timedelta(days=d) for d in (10, 40, 45, 50, 90)]
-    assert pick_expiration(exps, PARAMS, TODAY) == TODAY + timedelta(days=45)
+    p = StrategyParams(prefer_monthly_expirations=False)
+    assert pick_expiration(exps, p, TODAY) == TODAY + timedelta(days=45)
+
+
+def test_pick_expiration_prefers_monthly():
+    # TODAY is 2026-01-01 (Thu). Day 50 is 2026-02-20 (Fri, 3rd Friday monthly).
+    exps = [TODAY + timedelta(days=d) for d in (10, 40, 45, 50, 90)]
+    assert pick_expiration(exps, PARAMS, TODAY) == TODAY + timedelta(days=50)
 
 
 def test_pick_expiration_none_when_all_outside_window():

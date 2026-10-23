@@ -67,8 +67,21 @@ def test_defined_risk_one_third_width_rule():
         make_leg(OptionType.PUT, 95.0, Action.SELL_TO_OPEN, -0.20),
         make_leg(OptionType.PUT, 90.0, Action.BUY_TO_OPEN, -0.08),
     )
-    # $1.50 credit ($150 total): ratio = 1.50 / 5.0 = 0.300 < 0.333 -> rejected
+    # $1.00 credit ($100 total): ratio = 1.00 / 5.0 = 0.200 < 0.250 -> rejected
     bad = make_candidate(
+        strategy=Strategy.PUT_CREDIT_SPREAD,
+        legs=legs,
+        net_credit=100.0,
+        max_profit=100.0,
+        max_loss=400.0,
+        buying_power_reduction=400.0,
+    )
+    res_bad = validate_candidate(bad, PARAMS)
+    assert not res_bad.ok
+    assert any("1/3 rule" in v for v in res_bad.violations)
+
+    # $1.50 credit ($150 total): ratio = 1.50 / 5.0 = 0.300 >= 0.250 -> passes
+    good = make_candidate(
         strategy=Strategy.PUT_CREDIT_SPREAD,
         legs=legs,
         net_credit=150.0,
@@ -76,18 +89,21 @@ def test_defined_risk_one_third_width_rule():
         max_loss=350.0,
         buying_power_reduction=350.0,
     )
-    res_bad = validate_candidate(bad, PARAMS)
-    assert not res_bad.ok
-    assert any("1/3 rule" in v for v in res_bad.violations)
-
-    # $1.70 credit ($170 total): ratio = 1.70 / 5.0 = 0.340 >= 0.333 -> passes
-    good = make_candidate(
-        strategy=Strategy.PUT_CREDIT_SPREAD,
-        legs=legs,
-        net_credit=170.0,
-        max_profit=170.0,
-        max_loss=330.0,
-        buying_power_reduction=330.0,
-    )
     res_good = validate_candidate(good, PARAMS)
     assert res_good.ok
+
+    # Index call credit spread: $1.05 credit on $5.0 width (ratio 0.21) passes index 0.20 rule
+    index_call_legs = (
+        make_leg(OptionType.CALL, 100.0, Action.SELL_TO_OPEN, 0.20),
+        make_leg(OptionType.CALL, 105.0, Action.BUY_TO_OPEN, 0.08),
+    )
+    index_good = make_candidate(
+        symbol="SPY",
+        strategy=Strategy.CALL_CREDIT_SPREAD,
+        legs=index_call_legs,
+        net_credit=105.0,
+        max_profit=105.0,
+        max_loss=395.0,
+        buying_power_reduction=395.0,
+    )
+    assert validate_candidate(index_good, PARAMS).ok

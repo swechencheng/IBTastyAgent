@@ -41,3 +41,29 @@ def test_invalid_inputs():
     )
     c2 = make_candidate(buying_power_reduction=2000.0)
     assert size_trade(c2, net_liq=0, current_bp_used=0, limits=LIMITS).contracts == 0
+
+
+def test_strategy_bp_constrains():
+    from tastyagent.models import Strategy
+    # Defined-risk spread: max_spread_bp_pct = 0.20 ($20,000 on $100k net liq)
+    # Even if total BP has plenty of room (current_bp_used = 10,000),
+    # if spread BP is at 18,500 of 20,000 -> only 1,500 remaining -> 0 contracts of a 2,000 BP trade
+    c = make_candidate(strategy=Strategy.PUT_CREDIT_SPREAD, buying_power_reduction=2000.0)
+    r = size_trade(
+        c,
+        net_liq=100_000,
+        current_bp_used=10_000,
+        limits=LIMITS,
+        current_strategy_bp_used=18_500,
+    )
+    assert r.contracts == 0
+
+    # If spread BP is at 17,000 of 20,000 -> 3,000 remaining -> 1 contract
+    r2 = size_trade(
+        c,
+        net_liq=100_000,
+        current_bp_used=10_000,
+        limits=LIMITS,
+        current_strategy_bp_used=17_000,
+    )
+    assert r2.contracts == 1

@@ -22,6 +22,9 @@ class PortfolioState:
     consecutive_losses: int  # losing trades closed in a row
     cushion: float | None = None  # IBKR margin cushion ratio (Excess Liquidity / Net Liq)
     is_live: bool = False  # whether currently executing in live trading mode
+    losing_symbols: frozenset[str] = frozenset()  # symbols with an open losing position
+    spread_bp_used: float = 0.0  # BP currently allocated to defined-risk credit spreads / iron condors
+    undefined_bp_used: float = 0.0  # BP currently allocated to undefined-risk strangles / naked puts
 
 
 @dataclass(frozen=True)
@@ -35,6 +38,8 @@ def check_new_entry(
     incremental_bp: float,
     state: PortfolioState,
     limits: RiskLimits,
+    *,
+    is_defined_risk: bool | None = None,
 ) -> RiskResult:
     """Decide whether a new entry consuming ``incremental_bp`` is permitted."""
     v: list[str] = []
@@ -46,6 +51,10 @@ def check_new_entry(
         v.append(
             f"IBKR account cushion {state.cushion:.1%} < min {limits.min_cushion_pct:.0%}"
         )
+
+    # Tom Sosnoff: Don't average down on losing trades
+    if limits.anti_averaging_down and symbol in state.losing_symbols:
+        v.append(f"anti-averaging-down: {symbol} has an open losing position")
 
     if state.open_positions >= limits.max_positions:
         v.append(f"open positions {state.open_positions} >= max {limits.max_positions}")
@@ -62,6 +71,20 @@ def check_new_entry(
             v.append(
                 f"projected BP {projected_bp_pct:.0%} > max {limits.max_total_bp_pct:.0%}"
             )
+
+        # Strategy-specific allocation limits (Tastytrade portfolio buckets)
+        if is_defined_risk is True:
+            spread_bp_pct = (state.spread_bp_used + incremental_bp) / state.net_liq
+            if spread_bp_pct > limits.max_spread_bp_pct:
+                v.append(
+                    f"projected spread BP {spread_bp_pct:.0%} > max {limits.max_spread_bp_pct:.0%}"
+                )
+        elif is_defined_risk is False:
+            undef_bp_pct = (state.undefined_bp_used + incremental_bp) / state.net_liq
+            if undef_bp_pct > limits.max_undefined_bp_pct:
+                v.append(
+                    f"projected undefined-risk BP {undef_bp_pct:.0%} > max {limits.max_undefined_bp_pct:.0%}"
+                )
 
         daily_loss_pct = -state.realized_pnl_today / state.net_liq
         if daily_loss_pct >= limits.max_daily_loss_pct:

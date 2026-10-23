@@ -250,3 +250,95 @@ async def test_build_roll_candidate_untested_put_tested(mock_client):
         if l.option_type == OptionType.CALL and "buy" in l.action.value.lower()
     ]
     assert abs(short_calls[0].strike - long_calls[0].strike) == 30.0
+
+
+@pytest.mark.asyncio
+async def test_roll_out_preserves_put_credit_spread(mock_client):
+    trade = Trade(
+        id=280,
+        symbol="SPY",
+        strategy="put_credit_spread",
+        contracts=1,
+        status=TradeStatus.OPEN,
+        legs=[
+            TradeLeg(
+                option_type="put",
+                strike=500.0,
+                expiration=date(2026, 10, 16),
+                action="sell_to_open",
+                delta=-0.24,
+            ),
+            TradeLeg(
+                option_type="put",
+                strike=490.0,
+                expiration=date(2026, 10, 16),
+                action="buy_to_open",
+                delta=-0.07,
+            ),
+        ],
+    )
+    mark = PositionMark(cost_to_close=100.0)
+    params = StrategyParams(
+        min_dte=20, max_dte=60, target_dte=45, prefer_monthly_expirations=False
+    )
+
+    raw_exps = ["20261120"]
+    strikes = [480.0, 490.0, 500.0, 510.0, 520.0]
+    contracts = [
+        Option(
+            "SPY",
+            "20261120",
+            s,
+            r,
+            "SMART",
+            conId=int(s * 10 + (1 if r == "C" else 2)),
+        )
+        for s in strikes
+        for r in ("P", "C")
+    ]
+    snaps = {}
+    for c in contracts:
+        mid = (
+            4.00
+            if c.strike == 500.0 and c.right == "P"
+            else (1.25 if c.strike == 490.0 and c.right == "P" else 0.50)
+        )
+        delta = (
+            -0.24
+            if c.strike == 500.0 and c.right == "P"
+            else (-0.07 if c.strike == 490.0 and c.right == "P" else -0.02)
+        )
+        snaps[c.conId] = OptionSnapshot(
+            con_id=c.conId,
+            bid=Decimal(str(round(mid - 0.05, 2))),
+            ask=Decimal(str(round(mid + 0.05, 2))),
+            delta=delta,
+        )
+
+    cds = [MagicMock(contract=c) for c in contracts]
+    mock_client.data_ib.reqContractDetailsAsync = AsyncMock(return_value=cds)
+
+    with (
+        patch(
+            "tastyagent.runner.get_option_chain_parameters",
+            AsyncMock(return_value=(raw_exps, strikes)),
+        ),
+        patch("tastyagent.runner.get_underlying_price", AsyncMock(return_value=515.0)),
+        patch("tastyagent.runner.snapshot_options", AsyncMock(return_value=snaps)),
+        patch(
+            "tastyagent.runner.get_iv_metrics",
+            AsyncMock(return_value=MagicMock(iv_rank=0.45)),
+        ),
+    ):
+        cand = await _build_roll_candidate(
+            mock_client, trade, RollKind.OUT, mark, params
+        )
+
+    assert cand is not None
+    assert cand.strategy == Strategy.PUT_CREDIT_SPREAD
+    assert cand.iv_rank == 0.45
+    assert len(cand.legs) == 2
+    short_put = [l for l in cand.legs if l.action.value == "sell_to_open"][0]
+    long_put = [l for l in cand.legs if l.action.value == "buy_to_open"][0]
+    assert short_put.strike == 500.0
+    assert long_put.strike == 490.0

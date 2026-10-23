@@ -57,13 +57,22 @@ def _get_exp(opt) -> date:
 def pick_expiration(
     expirations: list[date], params: StrategyParams, today: date
 ) -> date | None:
-    """Choose the listed expiration closest to target DTE within the [min,max] window."""
+    """Choose the listed expiration closest to target DTE within the [min,max] window.
+
+    If params.prefer_monthly_expirations is True, prefer standard monthly expirations
+    (the third Friday of each month) to avoid short-term weeklies per Tom Sosnoff's guidance.
+    """
     target = today + timedelta(days=params.target_dte)
     valid = [
         d for d in expirations if params.min_dte <= (d - today).days <= params.max_dte
     ]
     if not valid:
         return None
+    if getattr(params, "prefer_monthly_expirations", True):
+        # Third Friday of the month (weekday 4, day between 15 and 21)
+        monthlies = [d for d in valid if d.weekday() == 4 and 15 <= d.day <= 21]
+        if monthlies:
+            return min(monthlies, key=lambda d: abs((d - target).days))
     return min(valid, key=lambda d: abs((d - target).days))
 
 
@@ -158,6 +167,8 @@ def build_naked_put_candidate(
             delta=put_snap.delta or 0.0,
         ),
     )
+    # Tom Sosnoff: Buying power requirement is approximately 20% of the underlying short strike price
+    strike_bp = round(0.20 * strike * 100, 2)
     return CandidateTrade(
         symbol=symbol,
         strategy=Strategy.NAKED_PUT,
@@ -166,7 +177,7 @@ def build_naked_put_candidate(
         net_credit=credit,
         max_profit=credit,
         max_loss=strike * 100 - credit,
-        buying_power_reduction=estimate_undefined_bp(underlying_price),
+        buying_power_reduction=strike_bp,
         underlying_price=underlying_price,
         iv_rank=iv_rank,
         liquidity=Liquidity(_width_pct(put_snap), _PLACEHOLDER_OI, _PLACEHOLDER_VOL),
@@ -307,6 +318,68 @@ def build_iron_condor_candidate(
     )
 
 
+def select_spread_long_option(
+    short_opt: Option,
+    candidates: list[Option],
+    snaps: dict[int, OptionSnapshot],
+    *,
+    is_put: bool,
+    min_ratio: float = 0.25,
+    max_ratio: float = 0.35,
+    fallback_delta: float = 0.07,
+) -> Option | None:
+    """Select the protective long wing for a credit spread.
+
+    Follows Tom Sosnoff's rule: widen strikes to collect between 25% and 33% of the width
+    (or 20%-25% for index call credit spreads).
+    """
+    short_snap = snaps.get(getattr(short_opt, "conId", 0))
+    if not short_snap or short_snap.mid is None:
+        return None
+    s_strike = _get_strike(short_opt)
+    s_mid = float(short_snap.mid)
+
+    eligible = []
+    for opt in candidates:
+        opt_snap = snaps.get(getattr(opt, "conId", 0))
+        if not opt_snap or opt_snap.mid is None:
+            continue
+        l_strike = _get_strike(opt)
+        if is_put and l_strike >= s_strike:
+            continue
+        if not is_put and l_strike <= s_strike:
+            continue
+        width = abs(s_strike - l_strike)
+        if width <= 0:
+            continue
+        net_credit = s_mid - float(opt_snap.mid)
+        if net_credit <= 0:
+            continue
+        ratio = net_credit / width
+        delta = abs(opt_snap.delta or 0.0)
+        eligible.append((opt, width, ratio, delta))
+
+    if not eligible:
+        return None
+
+    # 1. First priority: strikes collecting within target band [min_ratio, max_ratio]
+    in_band = [item for item in eligible if min_ratio <= item[2] <= max_ratio]
+    if in_band:
+        target_ratio = (min_ratio + max_ratio) / 2.0
+        return min(
+            in_band,
+            key=lambda x: (abs(x[2] - target_ratio), abs(x[3] - fallback_delta)),
+        )[0]
+
+    # 2. Second priority: any strike with ratio >= min_ratio
+    above_min = [item for item in eligible if item[2] >= min_ratio]
+    if above_min:
+        return min(above_min, key=lambda x: abs(x[2] - min_ratio))[0]
+
+    # 3. Fallback: closest to fallback delta
+    return min(eligible, key=lambda x: abs(x[3] - fallback_delta))[0]
+
+
 async def _candidates_for_symbol(
     client: IBKRClient, params: StrategyParams, today: date, symbol: str, m
 ) -> list[CandidateTrade]:
@@ -396,8 +469,38 @@ async def _candidates_for_symbol(
 
     p_short = select_by_delta(eligible_short_puts, snaps, params.target_short_delta)
     c_short = select_by_delta(eligible_short_calls, snaps, params.target_short_delta)
-    p_long = select_by_delta(puts, snaps, params.spread_long_delta)
-    c_long = select_by_delta(calls, snaps, params.spread_long_delta)
+
+    is_index = symbol.upper() in {"SPX", "SPY", "QQQ", "IWM", "DIA"}
+    min_put_ratio = params.min_credit_width_ratio
+    min_call_ratio = (
+        getattr(params, "index_call_min_credit_width_ratio", 0.20)
+        if is_index
+        else params.min_credit_width_ratio
+    )
+    p_long = (
+        select_spread_long_option(
+            p_short,
+            puts,
+            snaps,
+            is_put=True,
+            min_ratio=min_put_ratio,
+            fallback_delta=params.spread_long_delta,
+        )
+        if p_short
+        else None
+    )
+    c_long = (
+        select_spread_long_option(
+            c_short,
+            calls,
+            snaps,
+            is_put=False,
+            min_ratio=min_call_ratio,
+            fallback_delta=params.spread_long_delta,
+        )
+        if c_short
+        else None
+    )
 
     def sn(o):
         return snaps.get(o.conId)

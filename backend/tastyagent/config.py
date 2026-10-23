@@ -49,8 +49,11 @@ class StrategyParams:
     spread_long_delta: float = (
         0.07  # delta for protective long wings (spreads / condors)
     )
-    # Defined-risk spread / condor rule: min credit collected as ratio of strike width (Tastytrade 1/3 rule)
-    min_credit_width_ratio: float = 0.333
+    # Defined-risk spread / condor rule: min credit collected as ratio of strike width (Tastytrade 25%-33% rule)
+    min_credit_width_ratio: float = 0.25
+    # For index/ETF call credit spreads (SPX, QQQ, SPY, etc.), upside risk velocity is lower; allow 20%-25% width
+    index_call_min_credit_width_ratio: float = 0.20
+    prefer_monthly_expirations: bool = True
     # Liquidity filters
     max_bid_ask_width_pct: float = 0.10  # width / mid
     min_open_interest: int = 500
@@ -72,6 +75,10 @@ class StrategyParams:
             raise ValueError(
                 f"min_credit_width_ratio ({self.min_credit_width_ratio}) must be strictly positive"
             )
+        if self.index_call_min_credit_width_ratio <= 0:
+            raise ValueError(
+                f"index_call_min_credit_width_ratio ({self.index_call_min_credit_width_ratio}) must be strictly positive"
+            )
         if self.target_short_delta > self.max_short_leg_delta:
             raise ValueError(
                 f"target_short_delta ({self.target_short_delta}) cannot exceed "
@@ -92,6 +99,10 @@ class RiskLimits:
     # ^ 25% at $10k = $2,500/trade. 5% was too tight for defined-risk spreads at this
     #   working capital (most got rejected on sizing); tune live via PUT /api/settings.
     max_total_bp_pct: float = 0.40  # max aggregate BP usage vs net liq
+    # Strategy-specific allocation limits (Tastytrade portfolio balance)
+    max_spread_bp_pct: float = 0.20  # max 20% of net liq in defined-risk credit spreads / iron condors
+    max_undefined_bp_pct: float = 0.40  # max 40% of net liq in undefined-risk strangles / naked puts
+    anti_averaging_down: bool = True  # prohibit new positions in symbols that currently hold an open losing position
     max_positions: int = 15
     max_positions_per_symbol: int = 2
     max_daily_loss_pct: float = 0.03  # halt new entries after this daily drawdown

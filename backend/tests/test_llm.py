@@ -24,6 +24,7 @@ def test_clean_json_text():
 
 def test_settings_openrouter_defaults(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
     s = Settings(openrouter_api_key="")
     assert s.openrouter_model == "deepseek/deepseek-v4.1-flash"
     assert s.openrouter_base_url == "https://openrouter.ai/api/v1"

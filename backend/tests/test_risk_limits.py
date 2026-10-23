@@ -79,3 +79,35 @@ def test_sandbox_mode_ignores_low_cushion():
     state = healthy_state(is_live=False, cushion=0.20)
     res = check_new_entry("SPY", 2000.0, state, LIMITS)
     assert res.ok
+
+
+def test_anti_averaging_down_blocks_losing_symbol():
+    state = healthy_state(losing_symbols=frozenset({"NFLX"}))
+    res_losing = check_new_entry("NFLX", 2000.0, state, LIMITS)
+    assert not res_losing.ok
+    assert any("anti-averaging-down" in v for v in res_losing.violations)
+
+    res_other = check_new_entry("SPY", 2000.0, state, LIMITS)
+    assert res_other.ok
+
+
+def test_spread_bp_limit_blocks():
+    # 19k spread BP used on 100k net liq, max spread BP is 20% (20k).
+    # Adding 2k spread = 21k > 20k -> blocked
+    state = healthy_state(bp_used=19_000.0, spread_bp_used=19_000.0)
+    res = check_new_entry(
+        "SPY", 2000.0, state, LIMITS, is_defined_risk=True
+    )
+    assert not res.ok
+    assert any("projected spread BP" in v for v in res.violations)
+
+
+def test_undefined_bp_limit_blocks():
+    # 39k undefined BP used on 100k net liq, max undefined BP is 40% (40k).
+    # Adding 2k undefined = 41k > 40k -> blocked
+    state = healthy_state(bp_used=39_000.0, undefined_bp_used=39_000.0)
+    res = check_new_entry(
+        "SPY", 2000.0, state, LIMITS, is_defined_risk=False
+    )
+    assert not res.ok
+    assert any("projected undefined-risk BP" in v for v in res.violations)

@@ -100,6 +100,10 @@ class CandidateTrade:
 
     @property
     def probability_of_profit(self) -> float:
+        if self.strategy.is_defined_risk:
+            cw = self.credit_width_ratio
+            if cw is not None and 0.0 < cw < 1.0:
+                return round(1.0 - cw, 4)
         return probability_of_profit([leg.delta for leg in self.legs if leg.is_short])
 
     @property

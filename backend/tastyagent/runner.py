@@ -37,19 +37,24 @@ from .ibkr.marketdata import (
 )
 from .ibkr.placer import IBKRPlacer
 from .ibkr.scanner import scan_high_options_volume
-from .models import OptionType
+from .models import OptionType, Strategy
 from .portfolio.benchmark import latest_sp500_close
 from .portfolio.ledger import Ledger
 from .portfolio.pnl import summarize
 from .portfolio.watchlist import WatchlistRepo
+from .ibkr.metrics import get_iv_metrics
 from .strategy.candidates import (
     _parse_exp_date,
+    build_credit_spread_candidate,
     build_iron_condor_candidate,
+    build_naked_put_candidate,
     build_strangle_candidate,
     generate_candidates,
     pick_expiration,
+    select_spread_long_option,
 )
 from .strategy.exits import RollKind
+from .strategy.guardrails import validate_candidate
 
 logger = logging.getLogger(__name__)
 
@@ -219,18 +224,149 @@ async def _build_roll_candidate(
 
         puts = [c for c in relevant_contracts if c.right == "P"]
         calls = [c for c in relevant_contracts if c.right == "C"]
-        p = select_by_delta(puts, snaps, params.target_short_delta)
-        c = select_by_delta(calls, snaps, params.target_short_delta)
-        if not p or not c:
-            return None
 
-        sp, sc = snaps.get(p.conId), snaps.get(c.conId)
-        if not sp or not sc:
-            return None
+        # Retrieve fresh IV rank for underlying or fall back to min_iv_rank
+        iv_rank = params.min_iv_rank
+        try:
+            m = await get_iv_metrics(client.data_ib, sym)
+            if m and m.iv_rank is not None:
+                iv_rank = float(m.iv_rank)
+        except Exception as e:
+            logger.debug("Roll candidate IV rank lookup failed for %s: %s", sym, e)
 
-        return build_strangle_candidate(
-            sym, underlying, 1.0, (exp_date - today).days, p, c, sp, sc
-        )
+        dte = (exp_date - today).days
+        strat_str = str(getattr(trade.strategy, "value", trade.strategy)).lower()
+
+        if strat_str == "put_credit_spread":
+            p_short = select_by_delta(puts, snaps, params.target_short_delta)
+            if not p_short:
+                return None
+            p_long = select_spread_long_option(
+                p_short,
+                puts,
+                snaps,
+                is_put=True,
+                min_ratio=params.min_credit_width_ratio,
+                fallback_delta=params.spread_long_delta,
+            )
+            if not p_long:
+                return None
+            sp_s, sp_l = snaps.get(p_short.conId), snaps.get(p_long.conId)
+            if not sp_s or not sp_l:
+                return None
+            return build_credit_spread_candidate(
+                sym,
+                underlying,
+                iv_rank,
+                dte,
+                p_short,
+                p_long,
+                sp_s,
+                sp_l,
+                option_type=OptionType.PUT,
+                strategy=Strategy.PUT_CREDIT_SPREAD,
+            )
+
+        elif strat_str == "call_credit_spread":
+            is_index = sym.upper() in {"SPX", "SPY", "QQQ", "IWM", "DIA"}
+            min_call_ratio = (
+                getattr(params, "index_call_min_credit_width_ratio", 0.20)
+                if is_index
+                else params.min_credit_width_ratio
+            )
+            c_short = select_by_delta(calls, snaps, params.target_short_delta)
+            if not c_short:
+                return None
+            c_long = select_spread_long_option(
+                c_short,
+                calls,
+                snaps,
+                is_put=False,
+                min_ratio=min_call_ratio,
+                fallback_delta=params.spread_long_delta,
+            )
+            if not c_long:
+                return None
+            sc_s, sc_l = snaps.get(c_short.conId), snaps.get(c_long.conId)
+            if not sc_s or not sc_l:
+                return None
+            return build_credit_spread_candidate(
+                sym,
+                underlying,
+                iv_rank,
+                dte,
+                c_short,
+                c_long,
+                sc_s,
+                sc_l,
+                option_type=OptionType.CALL,
+                strategy=Strategy.CALL_CREDIT_SPREAD,
+            )
+
+        elif strat_str == "naked_put":
+            p_short = select_by_delta(puts, snaps, params.target_short_delta)
+            if not p_short:
+                return None
+            sp_s = snaps.get(p_short.conId)
+            if not sp_s:
+                return None
+            return build_naked_put_candidate(sym, underlying, iv_rank, dte, p_short, sp_s)
+
+        elif strat_str == "iron_condor":
+            p_short = select_by_delta(puts, snaps, params.target_short_delta)
+            c_short = select_by_delta(calls, snaps, params.target_short_delta)
+            if not p_short or not c_short:
+                return None
+            p_long = select_spread_long_option(
+                p_short,
+                puts,
+                snaps,
+                is_put=True,
+                min_ratio=params.min_credit_width_ratio,
+                fallback_delta=params.spread_long_delta,
+            )
+            c_long = select_spread_long_option(
+                c_short,
+                calls,
+                snaps,
+                is_put=False,
+                min_ratio=params.min_credit_width_ratio,
+                fallback_delta=params.spread_long_delta,
+            )
+            if not p_long or not c_long:
+                return None
+            sp_s, sc_s = snaps.get(p_short.conId), snaps.get(c_short.conId)
+            sp_l, sc_l = snaps.get(p_long.conId), snaps.get(c_long.conId)
+            if not sp_s or not sc_s or not sp_l or not sc_l:
+                return None
+            return build_iron_condor_candidate(
+                sym,
+                underlying,
+                iv_rank,
+                dte,
+                p_short,
+                c_short,
+                p_long,
+                c_long,
+                sp_s,
+                sc_s,
+                sp_l,
+                sc_l,
+            )
+
+        else:
+            p = select_by_delta(puts, snaps, params.target_short_delta)
+            c = select_by_delta(calls, snaps, params.target_short_delta)
+            if not p or not c:
+                return None
+
+            sp, sc = snaps.get(p.conId), snaps.get(c.conId)
+            if not sp or not sc:
+                return None
+
+            return build_strangle_candidate(
+                sym, underlying, iv_rank, dte, p, c, sp, sc
+            )
 
     if roll_kind is RollKind.UNTESTED:
         short_puts = [
@@ -463,7 +599,7 @@ async def run_one_cycle(
             walk_interval=getattr(runtime, "ibkr_walk_interval", 5),
             attach_tp=getattr(runtime, "ibkr_attach_tp", True),
             tp_pct=getattr(runtime, "ibkr_tp_pct", 0.50),
-            min_credit_width_ratio=getattr(runtime.strategy, "min_credit_width_ratio", 0.333),
+            min_credit_width_ratio=getattr(runtime.strategy, "min_credit_width_ratio", 0.25),
             min_cushion_pct=getattr(limits, "min_cushion_pct", 0.30),
         )
         if runtime.mode in (TradingMode.SANDBOX, TradingMode.LIVE_AUTO)
@@ -485,6 +621,17 @@ async def run_one_cycle(
             )
             if new_cand is None or new_cand.net_credit <= 0:
                 return None
+
+            # Re-validate replacement candidate against entry guardrails
+            gr = validate_candidate(new_cand, params)
+            if not gr.ok:
+                logger.warning(
+                    "Roll candidate for Trade #%s rejected by guardrails: %s; skipping roll",
+                    trade.id,
+                    "; ".join(gr.violations),
+                )
+                return None
+
             if (
                 roll_kind is RollKind.UNTESTED
                 and new_cand.net_credit < mark.cost_to_close
@@ -546,13 +693,35 @@ async def run_one_cycle(
             limits.min_cushion_pct * 100,
         )
 
-    bp_used = sum(t.buying_power for t in ledger.open_trades())
+    open_trades_list = ledger.open_trades()
+    bp_used = sum(t.buying_power for t in open_trades_list)
+    spread_bp_used = sum(
+        t.buying_power
+        for t in open_trades_list
+        if str(getattr(t.strategy, "value", t.strategy)).lower()
+        in ("put_credit_spread", "call_credit_spread", "iron_condor")
+    )
+    undefined_bp_used = sum(
+        t.buying_power
+        for t in open_trades_list
+        if str(getattr(t.strategy, "value", t.strategy)).lower()
+        not in ("put_credit_spread", "call_credit_spread", "iron_condor")
+    )
+    losing_symbols = {
+        t.symbol
+        for t in open_trades_list
+        if t.unrealized_pnl < 0
+    }
+
     portfolio = PortfolioInput(
         net_liq=net_liq,
         bp_used=bp_used,
         positions_by_symbol=ledger.positions_by_symbol(),
         cushion=cushion,
         is_live=is_live_mode,
+        losing_symbols=losing_symbols,
+        spread_bp_used=spread_bp_used,
+        undefined_bp_used=undefined_bp_used,
     )
 
     if cushion_blocked:

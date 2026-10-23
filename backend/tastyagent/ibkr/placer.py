@@ -59,7 +59,7 @@ class IBKRPlacer:
         walk_interval: int = 5,
         attach_tp: bool = True,
         tp_pct: float = 0.50,
-        min_credit_width_ratio: float = 0.333,
+        min_credit_width_ratio: float = 0.25,
         min_cushion_pct: float = 0.30,
     ) -> None:
         self.client = client

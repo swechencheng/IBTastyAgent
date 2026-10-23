@@ -52,10 +52,19 @@ def validate_candidate(
         if width is not None and width > 0:
             credit_ps = candidate.net_credit / 100.0
             ratio = credit_ps / width
-            if ratio < params.min_credit_width_ratio:
+            is_index_call = (
+                candidate.symbol.upper() in {"SPX", "SPY", "QQQ", "IWM", "DIA"}
+                and candidate.strategy.value == "call_credit_spread"
+            )
+            min_ratio = (
+                params.index_call_min_credit_width_ratio
+                if is_index_call
+                else params.min_credit_width_ratio
+            )
+            if ratio < min_ratio:
                 v.append(
                     f"credit/width ratio {ratio:.3f} (${credit_ps:.2f}/${width:.2f}) < "
-                    f"min {params.min_credit_width_ratio:.3f} (1/3 rule)"
+                    f"min {min_ratio:.3f} (1/3 rule / 25%-33% rule)"
                 )
 
     # Liquidity filters.

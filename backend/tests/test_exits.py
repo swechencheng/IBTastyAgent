@@ -117,6 +117,7 @@ def test_defined_risk_tp_when_width_target_is_below_half_credit():
     # $5.00 width spread, deep credit $380 ($3.80/sh).
     # 33% width = $166.50. 50% credit = $190.00.
     # Width target ($166.50) <= 50% credit ($190.00), so target is 1/3 width ($166.50, ~43.8% of credit).
+    params = StrategyParams(min_credit_width_ratio=0.333)
     p = OpenPosition(
         symbol="SPY",
         strategy=Strategy.PUT_CREDIT_SPREAD,
@@ -130,11 +131,11 @@ def test_defined_risk_tp_when_width_target_is_below_half_credit():
         strike_width=5.0,
         contracts=1,
     )
-    d = evaluate_exit(p, P)
+    d = evaluate_exit(p, params)
     assert d.action is ExitAction.HOLD
 
     # Cost drops to 213.50 -> $166.50 profit (43.8%) reached -> close at 1/3 width cap!
     p_hit = replace(p, current_cost_to_close=213.50)
-    d_hit = evaluate_exit(p_hit, P)
+    d_hit = evaluate_exit(p_hit, params)
     assert d_hit.action is ExitAction.CLOSE
     assert "1/3 width profit target" in d_hit.reason

@@ -31,6 +31,8 @@ class _StrategyEnv(BaseSettings):
     target_short_delta: float | None = None
     spread_long_delta: float | None = None
     min_credit_width_ratio: float | None = None
+    index_call_min_credit_width_ratio: float | None = None
+    prefer_monthly_expirations: bool | None = None
     max_bid_ask_width_pct: float | None = None
     min_open_interest: int | None = None
     min_daily_volume: int | None = None
@@ -49,6 +51,9 @@ class _RiskEnv(BaseSettings):
     )
     max_trade_bp_pct: float | None = None
     max_total_bp_pct: float | None = None
+    max_spread_bp_pct: float | None = None
+    max_undefined_bp_pct: float | None = None
+    anti_averaging_down: bool | None = None
     max_positions: int | None = None
     max_positions_per_symbol: int | None = None
     max_daily_loss_pct: float | None = None
