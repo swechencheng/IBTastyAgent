@@ -24,7 +24,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import EquityChart from "@/components/EquityChart";
-import { BuyingPowerCard, Empty, ErrorNote, Kpi, Loading, PageHeader, num, pop, signClass } from "@/components/common";
+import { BuyingPowerCard, Empty, ErrorNote, Kpi, Loading, PageHeader, getDte, num, pop, signClass } from "@/components/common";
 import { cn, formatLocalDateParts } from "@/lib/utils";
 
 const POLL = { refreshInterval: 8000 };
@@ -196,15 +196,22 @@ export default function Overview({ goTo }: { goTo: (r: string) => void }) {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {pos.slice(0, 5).map((t) => (
+                  {pos.slice(0, 5).map((t) => {
+                    const dte = getDte(t);
+                    return (
                     <TableRow key={t.id}>
                       <TableCell className="font-semibold">{t.symbol}</TableCell>
                       <TableCell className="text-muted-foreground">{t.strategy}</TableCell>
                       <TableCell className={cn("text-right", num)}>{pop(t.probability_of_profit)}</TableCell>
                       <TableCell className={cn("text-right", num, signClass(t.unrealized_pnl))}>{fmtMoneySigned(t.unrealized_pnl)}</TableCell>
-                      <TableCell className={cn("text-right", num)}>{t.dte_at_entry}</TableCell>
+                      <TableCell
+                        className={cn("text-right", num, dte <= 21 && "text-warn")}
+                        title={`Current DTE: ${dte} (Opened at: ${t.dte_at_entry} DTE)`}
+                      >
+                        {dte}
+                      </TableCell>
                     </TableRow>
-                  ))}
+                  ); })}
                 </TableBody>
               </Table>
             ) : (

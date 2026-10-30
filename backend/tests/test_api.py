@@ -65,6 +65,10 @@ def test_trades_positions_closed():
     assert "market_price" in p0
     assert "pnl_pct" in p0
     assert "change_pct" in p0
+    assert "dte" in p0
+    assert "dte_remaining" in p0
+    assert isinstance(p0["dte"], int)
+    assert p0["dte"] >= 0
     assert len(p0["legs"]) > 0
     leg0 = p0["legs"][0]
     assert "occ_symbol" in leg0
@@ -74,6 +78,41 @@ def test_trades_positions_closed():
     assert "change_pct" in leg0
     assert "pnl_pct" in leg0
     assert len(c.get("/api/trades/closed").json()) == 1
+
+
+def test_trade_dte_dynamic():
+    from datetime import date, timedelta
+    from tastyagent.db.models import Trade, TradeLeg
+
+    today = date.today()
+    trade = Trade(
+        symbol="SPY",
+        strategy="iron_condor",
+        dte_at_entry=45,
+        legs=[
+            TradeLeg(option_type="put", strike=500.0, expiration=today + timedelta(days=12), action="sell_to_open", quantity=1),
+            TradeLeg(option_type="call", strike=550.0, expiration=today + timedelta(days=12), action="sell_to_open", quantity=1),
+        ],
+    )
+    assert trade.dte == 12
+    assert trade.dte_remaining == 12
+
+    # Expired leg returns 0
+    trade_expired = Trade(
+        symbol="SPY",
+        strategy="iron_condor",
+        dte_at_entry=45,
+        legs=[
+            TradeLeg(option_type="put", strike=500.0, expiration=today - timedelta(days=2), action="sell_to_open", quantity=1),
+        ],
+    )
+    assert trade_expired.dte == 0
+    assert trade_expired.dte_remaining == 0
+
+    # No legs falls back to dte_at_entry
+    trade_no_legs = Trade(symbol="SPY", strategy="iron_condor", dte_at_entry=35, legs=[])
+    assert trade_no_legs.dte == 35
+
 
 
 def test_pnl():

@@ -204,7 +204,9 @@ def create_app(
         return f"{symbol.upper()} {exp_str}{right}{strike_val:08d}"
 
     def _enrich_trade_out(
-        trade: Trade, portfolio_items: list[Any] | None = None
+        trade: Trade,
+        portfolio_items: list[Any] | None = None,
+        tickers_map: dict[tuple[str, str, float, str], Any] | None = None,
     ) -> TradeOut:
         port_map = {}
         if portfolio_items:
@@ -225,16 +227,62 @@ def create_app(
             if trade.entry_credit
             else 0.0
         )
-        combo_mkt_price = (
-            round(trade.current_cost_to_close / (100.0 * contracts), 2)
-            if trade.current_cost_to_close
-            else 0.0
-        )
-        combo_unrealized = trade.unrealized_pnl
+
+        # Calculate real-time combo metrics from broker portfolio items if all legs present
+        live_cost_to_close = 0.0
+        all_legs_in_port = bool(port_map) and bool(trade.legs)
+        live_unrealized_sum = 0.0
+        has_leg_unrealized = True
+        has_leg_market_prices = True
+
+        for leg in trade.legs or []:
+            right = "P" if leg.option_type.lower() == "put" else "C"
+            strike = round(float(leg.strike), 2)
+            exp_str = str(leg.expiration).replace("-", "")
+            key = (trade.symbol.upper(), right, strike, exp_str)
+            p = port_map.get(key)
+            if (
+                p is not None
+                and getattr(p, "marketPrice", None) is not None
+                and float(p.marketPrice) >= 0.0
+            ):
+                mkt = float(p.marketPrice)
+                if "sell" in str(leg.action).lower():
+                    live_cost_to_close += mkt * 100.0 * contracts
+                else:
+                    live_cost_to_close -= mkt * 100.0 * contracts
+                if getattr(p, "unrealizedPNL", None) is not None:
+                    live_unrealized_sum += float(p.unrealizedPNL)
+                else:
+                    has_leg_unrealized = False
+            else:
+                all_legs_in_port = False
+                has_leg_market_prices = False
+
+        if all_legs_in_port and has_leg_market_prices:
+            combo_cost_to_close = max(0.0, round(live_cost_to_close, 2))
+            combo_mkt_price = round(combo_cost_to_close / (100.0 * contracts), 2)
+            if has_leg_unrealized:
+                combo_unrealized = round(live_unrealized_sum, 2)
+            else:
+                combo_unrealized = round(trade.entry_credit - combo_cost_to_close, 2)
+        else:
+            combo_cost_to_close = trade.current_cost_to_close
+            combo_mkt_price = (
+                round(combo_cost_to_close / (100.0 * contracts), 2)
+                if combo_cost_to_close
+                else 0.0
+            )
+            combo_unrealized = trade.unrealized_pnl
+
         combo_pnl_pct = (
             round((combo_unrealized / trade.entry_credit) * 100.0, 2)
             if trade.entry_credit
-            else 0.0
+            else (
+                round((combo_unrealized / trade.buying_power) * 100.0, 2)
+                if trade.buying_power
+                else 0.0
+            )
         )
         combo_change_pct = (
             round(((combo_mkt_price - combo_avg_price) / combo_avg_price) * 100.0, 2)
@@ -270,6 +318,17 @@ def create_app(
             leg_change_pct = None
             leg_delta = float(leg.delta or 0.0)
 
+            # Check if live ticker has updated model Greeks for delta
+            if tickers_map and key in tickers_map:
+                ticker = tickers_map[key]
+                greeks = (
+                    getattr(ticker, "modelGreeks", None)
+                    or getattr(ticker, "bidGreeks", None)
+                    or getattr(ticker, "askGreeks", None)
+                )
+                if greeks and getattr(greeks, "delta", None) is not None:
+                    leg_delta = round(float(greeks.delta), 4)
+
             if p is not None:
                 local = getattr(getattr(p, "contract", None), "localSymbol", None)
                 if local:
@@ -282,6 +341,12 @@ def create_app(
                     avg_price = round(float(p.averageCost) / 100.0, 2)
                 if getattr(p, "unrealizedPNL", None) is not None:
                     leg_unrealized = round(float(p.unrealizedPNL), 2)
+
+                if leg_unrealized is None and mkt_price is not None and avg_price is not None:
+                    if is_sell:
+                        leg_unrealized = round((avg_price - mkt_price) * abs(pos_size) * 100.0, 2)
+                    else:
+                        leg_unrealized = round((mkt_price - avg_price) * abs(pos_size) * 100.0, 2)
 
                 if leg_unrealized is not None and avg_price and avg_price > 0:
                     cost_basis = abs(pos_size) * avg_price * 100.0
@@ -325,24 +390,64 @@ def create_app(
         trade_out.net_delta = round(net_delta, 2)
         trade_out.average_price = combo_avg_price
         trade_out.market_price = combo_mkt_price
+        trade_out.current_cost_to_close = combo_cost_to_close
+        trade_out.unrealized_pnl = combo_unrealized
         trade_out.pnl_pct = combo_pnl_pct
         trade_out.change_pct = combo_change_pct
+        trade_out.dte = trade.dte
+        trade_out.dte_remaining = trade.dte
         return trade_out
 
     def _get_active_portfolio_items() -> list[Any]:
-        if app.state.client and app.state.client.active_trading_ib:
-            try:
-                return list(app.state.client.active_trading_ib.portfolio())
-            except Exception:
-                pass
-        return []
+        items = []
+        client = getattr(app.state, "client", None)
+        if client:
+            for ib_session in (
+                getattr(client, "active_trading_ib", None),
+                getattr(client, "data_ib", None),
+            ):
+                if ib_session and ib_session.isConnected():
+                    try:
+                        items.extend(ib_session.portfolio())
+                    except Exception:
+                        pass
+        return items
+
+    def _get_active_tickers_map() -> dict[tuple[str, str, float, str], Any]:
+        ticker_map = {}
+        client = getattr(app.state, "client", None)
+        if client:
+            for ib_session in (
+                getattr(client, "active_trading_ib", None),
+                getattr(client, "data_ib", None),
+            ):
+                if ib_session and ib_session.isConnected():
+                    try:
+                        for t in ib_session.tickers():
+                            c = getattr(t, "contract", None)
+                            if c is not None:
+                                sym = getattr(c, "symbol", "").upper()
+                                right = getattr(c, "right", "").upper()
+                                strike = round(float(getattr(c, "strike", 0.0)), 2)
+                                exp = str(
+                                    getattr(c, "lastTradeDateOrContractMonth", "") or ""
+                                ).replace("-", "")
+                                ticker_map[(sym, right, strike, exp)] = t
+                    except Exception:
+                        pass
+        return ticker_map
 
     @app.get("/api/trades", response_model=list[TradeOut])
     def trades(s: Session = Depends(get_session)) -> list[TradeOut]:
         port = _get_active_portfolio_items()
-        return [_enrich_trade_out(t, port) for t in Ledger(s).all_trades()]
+        tickers = _get_active_tickers_map()
+        return [_enrich_trade_out(t, port, tickers) for t in Ledger(s).all_trades()]
 
     @app.get("/api/positions", response_model=list[TradeOut])
+    def positions(s: Session = Depends(get_session)) -> list[TradeOut]:
+        port = _get_active_portfolio_items()
+        tickers = _get_active_tickers_map()
+        return [_enrich_trade_out(t, port, tickers) for t in Ledger(s).open_trades()]
     def positions(s: Session = Depends(get_session)) -> list[TradeOut]:
         port = _get_active_portfolio_items()
         return [_enrich_trade_out(t, port) for t in Ledger(s).open_trades()]

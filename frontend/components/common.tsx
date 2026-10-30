@@ -12,6 +12,35 @@ export const pop = (p: number | null | undefined) => `${Math.round((p ?? 0) * 10
 export const signClass = (n: number) => (n > 0 ? "text-gain" : n < 0 ? "text-loss" : "text-foreground");
 export const num = "font-mono tabular-nums";
 
+/**
+ * Calculate the current remaining DTE (Days To Expiration) for a trade.
+ * Prioritizes dynamic `t.dte` / `t.dte_remaining` from the backend,
+ * or calculates from `t.legs` expiration dates against client-side current date,
+ * falling back to `t.dte_at_entry`.
+ */
+export function getDte(t: Trade): number {
+  if (t.dte != null) return t.dte;
+  if (t.dte_remaining != null) return t.dte_remaining;
+  if (t.legs && t.legs.length > 0) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const exps = t.legs
+      .map((l) => {
+        if (!l.expiration) return null;
+        const d = new Date(l.expiration);
+        return isNaN(d.getTime()) ? null : d;
+      })
+      .filter((d): d is Date => d !== null);
+    if (exps.length > 0) {
+      const minExp = new Date(Math.min(...exps.map((d) => d.getTime())));
+      minExp.setHours(0, 0, 0, 0);
+      const diffDays = Math.round((minExp.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+      return Math.max(0, diffDays);
+    }
+  }
+  return t.dte_at_entry ?? 0;
+}
+
 /* ---- KPI card ------------------------------------------------------------- */
 export function Kpi({
   label,

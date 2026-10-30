@@ -28,6 +28,7 @@ import {
   Pagination,
   PositionTimeline,
   ProfitBar,
+  getDte,
   num,
   pop,
   signClass,
@@ -118,7 +119,9 @@ export default function Positions() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {openPg.pageItems.map((t) => (
+                    {openPg.pageItems.map((t) => {
+                      const dte = getDte(t);
+                      return (
                       <Fragment key={t.id}>
                         <TableRow className="cursor-pointer hover:bg-surface-2/50 transition-colors" onClick={() => toggle(t.id)}>
                           <TableCell className="font-semibold text-foreground">{t.symbol}</TableCell>
@@ -138,8 +141,11 @@ export default function Positions() {
                           <TableCell className={cn("text-right", num, "text-muted-foreground")}>
                             {fmtSignedDelta(t.net_delta)}
                           </TableCell>
-                          <TableCell className={cn("text-right", num, t.dte_at_entry <= 22 && "text-warn")}>
-                            {t.dte_at_entry}
+                          <TableCell
+                            className={cn("text-right", num, dte <= 21 && "text-warn")}
+                            title={`Current DTE: ${dte} (Opened at: ${t.dte_at_entry} DTE)`}
+                          >
+                            {dte}
                           </TableCell>
                           <TableCell>
                             <Badge variant={t.status === "open" ? "open" : "warn"}>{t.status}</Badge>
@@ -308,7 +314,7 @@ export default function Positions() {
                           </TableRow>
                         )}
                       </Fragment>
-                    ))}
+                    ); })}
                   </TableBody>
                 </Table>
                 <Pagination page={openPg.page} pageCount={openPg.pageCount} onPage={openPg.setPage} />

@@ -73,6 +73,8 @@ export interface Trade {
   entry_credit: number;
   buying_power: number;
   dte_at_entry: number;
+  dte?: number | null;
+  dte_remaining?: number | null;
   current_cost_to_close: number;
   unrealized_pnl: number;
   probability_of_profit: number;

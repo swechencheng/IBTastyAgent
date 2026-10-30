@@ -127,6 +127,28 @@ class Trade(Base):
 
         return calculate_strike_width(self.strategy, self.legs)
 
+    @property
+    def dte(self) -> int:
+        """Current remaining days to expiration (min expiration across legs minus today)."""
+        if self.legs:
+            today = datetime.now(timezone.utc).date()
+            exps: list[date] = []
+            for leg in self.legs:
+                exp = leg.expiration
+                if exp:
+                    if isinstance(exp, str):
+                        clean = str(exp).replace("-", "")
+                        exp = date(int(clean[:4]), int(clean[4:6]), int(clean[6:8]))
+                    exps.append(exp)
+            if exps:
+                min_exp = min(exps)
+                return max(0, (min_exp - today).days)
+        return self.dte_at_entry
+
+    @property
+    def dte_remaining(self) -> int:
+        return self.dte
+
 
 class TradeLeg(Base):
     __tablename__ = "trade_legs"

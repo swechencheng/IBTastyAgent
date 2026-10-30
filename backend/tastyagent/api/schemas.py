@@ -55,6 +55,8 @@ class TradeOut(BaseModel):
     entry_credit: float
     buying_power: float
     dte_at_entry: int
+    dte: int | None = None
+    dte_remaining: int | None = None
     current_cost_to_close: float
     unrealized_pnl: float
     probability_of_profit: float
