@@ -39,6 +39,8 @@ class _StrategyEnv(BaseSettings):
     min_open_interest: int | None = None
     min_daily_volume: int | None = None
     earnings_blackout_days: int | None = None
+    enforce_min_vix: bool | None = None
+    min_vix: float | None = None
     universe_top_n: int | None = None
     take_profit_pct: float | None = None
     manage_dte: int | None = None

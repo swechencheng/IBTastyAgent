@@ -210,7 +210,12 @@ def test_put_settings_syncs_to_configured_env_file(tmp_path):
             "use_custom_working_capital": False,
             "working_capital": 30000.0,
             "scheduler_interval_seconds": 180.0,
-            "strategy": {"min_iv_rank": 0.35, "target_short_delta": 0.18},
+            "strategy": {
+                "min_iv_rank": 0.35,
+                "target_short_delta": 0.18,
+                "enforce_min_vix": False,
+                "min_vix": 16.5,
+            },
             "risk": {"max_trade_bp_pct": 0.09},
         },
     )
@@ -222,6 +227,8 @@ def test_put_settings_syncs_to_configured_env_file(tmp_path):
     assert "TASTYAGENT_USE_CUSTOM_WORKING_CAPITAL=false" in content
     assert "TASTYAGENT_SCHEDULER_INTERVAL_SECONDS=180.0" in content
     assert "TASTYAGENT_TARGET_SHORT_DELTA=0.18" in content
+    assert "TASTYAGENT_ENFORCE_MIN_VIX=false" in content
+    assert "TASTYAGENT_MIN_VIX=16.5" in content
     assert "TASTYAGENT_MAX_TRADE_BP_PCT=0.09" in content
     assert "TASTYAGENT_MODE=live_approval" in content
 

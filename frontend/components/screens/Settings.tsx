@@ -54,6 +54,8 @@ type Form = {
   minOpenInterest: number;
   minDailyVolume: number;
   earningsBlackoutDays: number;
+  enforceMinVix: boolean;
+  minVix: number;
 
   // --- Management ---
   takeProfit: number;
@@ -136,6 +138,8 @@ function fromSettings(sData: SettingsT): Form {
     minOpenInterest: n(st.min_open_interest, 500),
     minDailyVolume: n(st.min_daily_volume, 100),
     earningsBlackoutDays: n(st.earnings_blackout_days, 7),
+    enforceMinVix: st.enforce_min_vix !== undefined ? !!st.enforce_min_vix : true,
+    minVix: n(st.min_vix, 15),
 
     takeProfit: Math.round(n(st.take_profit_pct, 0.5) * 100),
     manageDte: n(st.manage_dte, 14),
@@ -203,6 +207,8 @@ function toPayload(f: Form): SettingsUpdate {
       min_open_interest: f.minOpenInterest,
       min_daily_volume: f.minDailyVolume,
       earnings_blackout_days: f.earningsBlackoutDays,
+      enforce_min_vix: f.enforceMinVix,
+      min_vix: f.minVix,
       take_profit_pct: f.takeProfit / 100,
       manage_dte: f.manageDte,
       use_hard_stop: f.hardStop,
@@ -727,6 +733,28 @@ export default function Settings({
                 unit="days"
               >
                 <NInput value={form.earningsBlackoutDays} onChange={(v) => set("earningsBlackoutDays", v)} />
+              </Field>
+              <Field
+                label="Enforce minimum VIX filter"
+                help="Do not open any new positions when live VIX is below the threshold below. Existing position exits & rolls still run."
+              >
+                <Switch
+                  checked={form.enforceMinVix}
+                  onCheckedChange={(v) => set("enforceMinVix", v)}
+                  aria-label="Enforce minimum VIX filter"
+                />
+              </Field>
+              <Field
+                label="Min VIX threshold"
+                help="Minimum CBOE VIX level required to open new positions when the VIX filter is enabled (default: 15)."
+                unit="VIX"
+                derived={
+                  form.enforceMinVix
+                    ? `Halts new entries whenever VIX < ${form.minVix}`
+                    : "VIX entry filter disabled — new entries allowed at any VIX"
+                }
+              >
+                <NInput value={form.minVix} onChange={(v) => set("minVix", v)} step={0.5} />
               </Field>
             </CardContent>
           </Card>

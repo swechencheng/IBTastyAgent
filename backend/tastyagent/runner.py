@@ -32,6 +32,7 @@ from .ibkr.client import IBKRClient
 from .ibkr.marketdata import (
     get_option_chain_parameters,
     get_underlying_price,
+    get_vix_level,
     select_by_delta,
     snapshot_options,
 )
@@ -56,6 +57,7 @@ from .strategy.candidates import (
 from .strategy.exits import RollKind
 from .strategy.guardrails import (
     INDEX_OR_ETF_SYMBOLS,
+    is_vix_below_min,
     validate_roll_candidate,
 )
 
@@ -889,38 +891,57 @@ async def run_one_cycle(
         candidates = []
         regime = {"cushion": cushion, "cushion_guard_active": True}
     else:
-        # 4. Market Context (IV Rank for universe via IBKR 1-year historical IV + cache)
         metrics_session = client.data_ib or client.active_trading_ib
-        scheduler_interval = float(getattr(runtime, "scheduler_interval_seconds", 300.0))
-        max_retry_seconds = min(300.0, scheduler_interval)
-        metrics, regime = await gather_context(
-            metrics_session,
-            params,
-            universe,
-            max_retry_seconds=max_retry_seconds,
-        )
-        top_symbols = rank_universe(metrics, params.universe_top_n)
-        logger.info(
-            "Universe scan: %d symbols configured, %d top symbols selected by IV rank (%s)",
-            len(universe),
-            len(top_symbols),
-            ", ".join(top_symbols) if top_symbols else "none",
-        )
-        candidates = await generate_candidates(
-            client,
-            metrics_session,
-            params,
-            top_symbols,
-            metrics=metrics,
-            max_trade_bp=(
-                limits.max_trade_bp_pct * net_liq if net_liq > 0 else None
-            ),
-        )
-        logger.info(
-            "Candidate generation complete: %d candidate trades found across %d symbols",
-            len(candidates),
-            len(top_symbols),
-        )
+        vix_level = await get_vix_level(metrics_session)
+        if is_vix_below_min(vix_level, params):
+            logger.warning(
+                "🛑 [VIX GUARD] Live VIX is %.2f (minimum required: %.2f). "
+                "Skipping candidate scan and halting opening of new positions.",
+                vix_level,
+                params.min_vix,
+            )
+            top_symbols = []
+            candidates = []
+            regime = {
+                "vix": round(float(vix_level), 2),
+                "vix_guard_active": True,
+                "min_vix": params.min_vix,
+            }
+        else:
+            # 4. Market Context (IV Rank for universe via IBKR 1-year historical IV + cache)
+            scheduler_interval = float(
+                getattr(runtime, "scheduler_interval_seconds", 300.0)
+            )
+            max_retry_seconds = min(300.0, scheduler_interval)
+            metrics, regime = await gather_context(
+                metrics_session,
+                params,
+                universe,
+                max_retry_seconds=max_retry_seconds,
+                vix=vix_level,
+            )
+            top_symbols = rank_universe(metrics, params.universe_top_n)
+            logger.info(
+                "Universe scan: %d symbols configured, %d top symbols selected by IV rank (%s)",
+                len(universe),
+                len(top_symbols),
+                ", ".join(top_symbols) if top_symbols else "none",
+            )
+            candidates = await generate_candidates(
+                client,
+                metrics_session,
+                params,
+                top_symbols,
+                metrics=metrics,
+                max_trade_bp=(
+                    limits.max_trade_bp_pct * net_liq if net_liq > 0 else None
+                ),
+            )
+            logger.info(
+                "Candidate generation complete: %d candidate trades found across %d symbols",
+                len(candidates),
+                len(top_symbols),
+            )
 
     # 5. Decision cycle (LLM / Guardrails)
     result = await run_cycle(candidates, portfolio, regime, params, limits)

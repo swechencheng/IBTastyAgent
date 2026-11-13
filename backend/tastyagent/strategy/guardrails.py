@@ -211,3 +211,12 @@ def filter_candidates(
 ) -> list[CandidateTrade]:
     """Keep only candidates that pass all guardrails."""
     return [c for c in candidates if validate_candidate(c, params).ok]
+
+
+def is_vix_below_min(vix: float | None, params: StrategyParams) -> bool:
+    """Return True when the minimum-VIX entry filter is enabled and VIX < min_vix."""
+    return (
+        bool(params.enforce_min_vix)
+        and vix is not None
+        and float(vix) < params.min_vix
+    )

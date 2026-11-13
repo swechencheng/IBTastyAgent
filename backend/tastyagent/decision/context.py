@@ -10,6 +10,7 @@ from __future__ import annotations
 from statistics import fmean
 
 from ..config import StrategyParams
+from ..ibkr.marketdata import get_vix_level
 from ..ibkr.metrics import IVMetrics, get_iv_metrics
 
 # A liquid, diversified default universe. Override via gather_context(watchlist=...).
@@ -54,7 +55,7 @@ def build_regime(
         note = "moderate IV — sell premium where IV rank is locally elevated"
 
     return {
-        "vix": vix,
+        "vix": round(float(vix), 2) if vix is not None else None,
         "avg_iv_rank": round(avg, 3),
         "high_ivr_symbols": high,
         "iv_ranks": {s: round(r, 3) for s, r in sorted(iv_ranks.items())},
@@ -83,16 +84,23 @@ def rank_universe(metrics: dict[str, IVMetrics], top_n: int) -> list[str]:
     return result
 
 
+_UNSET = object()
+
+
 async def gather_context(
     metrics_session,
     params: StrategyParams,
     watchlist: list[str] | None = None,
     max_retry_seconds: float = 300.0,
+    *,
+    vix: float | None | object = _UNSET,
 ) -> tuple[dict[str, IVMetrics], dict]:
     """Fetch IV metrics for the watchlist and build the regime. Returns (metrics, regime)."""
     watchlist = watchlist or DEFAULT_WATCHLIST
+    resolved_vix: float | None = (
+        await get_vix_level(metrics_session) if vix is _UNSET else vix  # type: ignore[assignment]
+    )
     metrics = await get_iv_metrics(
         metrics_session, watchlist, max_retry_seconds=max_retry_seconds
     )
-    vix: float | None = None  # VIX index metrics are best-effort; left None for now
-    return metrics, build_regime(metrics, params, vix)
+    return metrics, build_regime(metrics, params, resolved_vix)

@@ -13,7 +13,7 @@ import logging
 import math
 from typing import Dict, List, Optional, Tuple
 
-from ib_async import IB, Option, Stock
+from ib_async import IB, Index, Option, Stock
 
 logger = logging.getLogger(__name__)
 
@@ -223,3 +223,92 @@ def select_by_delta(
     return min(
         with_delta, key=lambda o: abs(abs(snaps[o.conId].delta or 0.0) - target_delta)
     )
+
+
+def _positive_finite(val) -> Optional[float]:
+    if isinstance(val, (int, float)) and math.isfinite(val) and val > 0:
+        return float(val)
+    return None
+
+
+async def _fetch_vix_ibkr(ib: Optional[IB], timeout: float = 3.0) -> Optional[float]:
+    """Best-effort VIX quote via IBKR CBOE index contract."""
+    if not ib or not ib.isConnected():
+        return None
+    vix = Index("VIX", "CBOE", "USD")
+    try:
+        await asyncio.wait_for(ib.qualifyContractsAsync(vix), timeout=min(timeout, 2.0))
+        if not vix.conId:
+            return None
+        ib.reqMarketDataType(3)
+        ticker = ib.reqMktData(vix, genericTickList="", snapshot=False)
+        try:
+            end_time = asyncio.get_event_loop().time() + min(timeout, 2.0)
+            while asyncio.get_event_loop().time() < end_time:
+                await asyncio.sleep(0.2)
+                for candidate in (
+                    getattr(ticker, "last", None),
+                    getattr(ticker, "close", None),
+                    ticker.marketPrice(),
+                ):
+                    px = _positive_finite(candidate)
+                    if px is not None:
+                        return round(px, 2)
+        finally:
+            ib.cancelMktData(vix)
+
+        bars = await asyncio.wait_for(
+            ib.reqHistoricalDataAsync(
+                vix,
+                endDateTime="",
+                durationStr="2 D",
+                barSizeSetting="1 day",
+                whatToShow="TRADES",
+                useRTH=True,
+            ),
+            timeout=timeout,
+        )
+        if bars:
+            px = _positive_finite(bars[-1].close)
+            if px is not None:
+                return round(px, 2)
+    except Exception as e:
+        logger.debug("IBKR VIX lookup unavailable: %s", e)
+    return None
+
+
+async def _fetch_vix_yahoo(timeout: float = 6.0) -> Optional[float]:
+    """Fallback best-effort live VIX quote via Yahoo Finance's keyless chart endpoint."""
+    try:
+        import httpx  # noqa: PLC0415
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(
+                "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX",
+                params={"range": "5d", "interval": "5m"},
+                headers={"User-Agent": "tastyagent/0.1"},
+            )
+            resp.raise_for_status()
+        result = resp.json()["chart"]["result"][0]
+        meta_px = _positive_finite(result.get("meta", {}).get("regularMarketPrice"))
+        if meta_px is not None:
+            return round(meta_px, 2)
+        closes = result.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+        for close in reversed(closes):
+            px = _positive_finite(close)
+            if px is not None:
+                return round(px, 2)
+    except Exception as e:
+        logger.debug("Yahoo VIX lookup failed: %s", e)
+    return None
+
+
+async def get_vix_level(
+    ib: Optional[IB] = None,
+    timeout: float = 5.0,
+) -> Optional[float]:
+    """Fetch current CBOE VIX level (IBKR primary, Yahoo ^VIX fallback)."""
+    px = await _fetch_vix_ibkr(ib, timeout=timeout)
+    if px is not None:
+        return px
+    return await _fetch_vix_yahoo(timeout=timeout)

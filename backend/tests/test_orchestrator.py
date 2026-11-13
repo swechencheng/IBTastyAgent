@@ -220,3 +220,52 @@ async def test_infeasible_candidates_filtered_before_llm_and_summary_enriched():
     assert "spread_bp_remaining" in seen_portfolio
     assert "undefined_bp_remaining" in seen_portfolio
     assert seen_portfolio["losing_symbols_cooldown"] == ["XLE"]
+
+
+async def test_low_vix_halts_new_entries_when_enabled():
+    from dataclasses import replace
+
+    good = make_candidate(symbol="SPY", buying_power_reduction=2000.0)
+    called = False
+
+    async def fail_if_called(candidates, port_summary, regime):
+        nonlocal called
+        called = True
+        return LLMDecision(selections=[], commentary="should not run"), {}
+
+    res = await run_cycle(
+        [good],
+        portfolio(),
+        {"vix": 14.2},
+        PARAMS,
+        LIMITS,
+        selector=fail_if_called,
+    )
+    assert not called
+    assert res.planned == []
+    assert res.considered == 0
+    assert len(res.rejected) == 1
+    assert "vix guard" in res.rejected[0][1]
+    assert "14.20" in res.commentary
+
+    # At or above threshold (15.0) allows entries
+    res_ok = await run_cycle(
+        [good],
+        portfolio(),
+        {"vix": 15.0},
+        PARAMS,
+        LIMITS,
+        selector=selector_picking([(0, 1)]),
+    )
+    assert len(res_ok.planned) == 1
+
+    # Disabled toggle allows entries even when VIX < 15
+    res_disabled = await run_cycle(
+        [good],
+        portfolio(),
+        {"vix": 12.1},
+        replace(PARAMS, enforce_min_vix=False),
+        LIMITS,
+        selector=selector_picking([(0, 1)]),
+    )
+    assert len(res_disabled.planned) == 1

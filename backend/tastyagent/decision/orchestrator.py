@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from ..config import RiskLimits, StrategyParams
 from ..models import CandidateTrade
 from ..risk.limits import PortfolioState, check_new_entry
-from ..strategy.guardrails import validate_candidate
+from ..strategy.guardrails import is_vix_below_min, validate_candidate
 from ..strategy.sizing import size_trade
 from .llm import LLMDecision, select_trades
 
@@ -202,6 +202,26 @@ async def run_cycle(
             commentary=(
                 f"IBKR account cushion ({portfolio.cushion:.1%}) is below the "
                 f"{limits.min_cushion_pct:.0%} minimum threshold; opening new positions is halted per live risk guard."
+            ),
+            considered=0,
+        )
+
+    # Low-VIX guard: halt opening new positions when VIX < params.min_vix (if enabled)
+    vix = regime.get("vix") if isinstance(regime, dict) else None
+    if is_vix_below_min(vix, params):
+        vix_val = float(vix)
+        return CycleResult(
+            planned=[],
+            rejected=[
+                (
+                    c,
+                    f"vix guard: VIX {vix_val:.2f} < min {params.min_vix:.2f}",
+                )
+                for c in candidates
+            ],
+            commentary=(
+                f"Live VIX ({vix_val:.2f}) is below the {params.min_vix:.2f} minimum "
+                f"volatility threshold; opening new positions is halted per VIX filter."
             ),
             considered=0,
         )

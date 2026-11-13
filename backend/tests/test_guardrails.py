@@ -222,3 +222,54 @@ def test_validate_roll_candidate_rules():
         params=PARAMS,
     )
     assert not wider_roll.ok
+
+
+def test_is_vix_below_min_and_validation():
+    from dataclasses import replace
+    import pytest
+    from tastyagent.strategy.guardrails import is_vix_below_min
+
+    assert PARAMS.enforce_min_vix is True
+    assert PARAMS.min_vix == 15.0
+
+    assert is_vix_below_min(14.9, PARAMS) is True
+    assert is_vix_below_min(15.0, PARAMS) is False
+    assert is_vix_below_min(19.5, PARAMS) is False
+    assert is_vix_below_min(None, PARAMS) is False
+
+    disabled = replace(PARAMS, enforce_min_vix=False)
+    assert is_vix_below_min(11.2, disabled) is False
+
+    with pytest.raises(ValueError):
+        StrategyParams(min_vix=-1.0)
+
+
+async def test_get_vix_level_fallback_to_yahoo(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+    from tastyagent.ibkr import marketdata
+
+    monkeypatch.setattr(marketdata, "_fetch_vix_ibkr", AsyncMock(return_value=None))
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = {
+        "chart": {"result": [{"meta": {"regularMarketPrice": 14.35}}]}
+    }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, *args, **kwargs):
+            return mock_resp
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    val = await marketdata.get_vix_level(None)
+    assert val == 14.35
