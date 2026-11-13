@@ -214,3 +214,224 @@ async def test_placer_attaches_tp_for_defined_risk_spread_deep_credit(mock_clien
     placed_tp = mock_client.trading_ib.placeOrder.call_args_list[1][0][1]
     assert placed_tp.action == "SELL"
     assert placed_tp.lmtPrice == -2.13
+
+
+import asyncio as _asyncio
+from types import SimpleNamespace as _SimpleNamespace
+from unittest.mock import AsyncMock as _AsyncMock, MagicMock as _MagicMock
+import pytest as _pytest
+from tastyagent.config import TradingMode as _TradingMode
+from tastyagent.db.models import (
+    Trade as _Trade,
+    TradeLeg as _TradeLeg,
+    TradeStatus as _TradeStatus,
+)
+from tastyagent.ibkr.placer import IBKRPlacer as _IBKRPlacer
+
+
+class _DummyErrorEvent:
+    def __init__(self) -> None:
+        self.handlers: list = []
+
+    def __iadd__(self, fn):
+        self.handlers.append(fn)
+        return self
+
+    def __isub__(self, fn):
+        if fn in self.handlers:
+            self.handlers.remove(fn)
+        return self
+
+    def emit(self, req_id: int, code: int, msg: str, contract=None) -> None:
+        for fn in list(self.handlers):
+            fn(req_id, code, msg, contract)
+
+
+def _make_single_leg_trade(trade_id: int = 190) -> _Trade:
+    return _Trade(
+        id=trade_id,
+        symbol="IGV",
+        strategy="naked_put",
+        contracts=1,
+        status=_TradeStatus.WORKING,
+        mode=_TradingMode.SANDBOX,
+        entry_credit=620.0,
+        legs=[
+            _TradeLeg(
+                option_type="put",
+                strike=94.0,
+                expiration="2026-12-18",
+                action="sell_to_open",
+                delta=-0.30,
+            )
+        ],
+    )
+
+
+@_pytest.mark.asyncio
+async def test_placer_opens_and_closes_single_leg_naked_put_as_direct_option():
+    placed: list[tuple] = []
+    preflight_contracts: list = []
+    canceled_orders: list = []
+
+    ib = _MagicMock()
+    ib.errorEvent = _DummyErrorEvent()
+
+    async def _qualify(opt):
+        opt.conId = 8675309
+        return [opt]
+
+    async def _what_if(contract, order):
+        preflight_contracts.append((contract, order))
+        return _SimpleNamespace(
+            initMarginChange="10626.53",
+            maintMarginChange="8500.0",
+            commission=1.7976931348623157e308,
+        )
+
+    next_order_id = [100]
+
+    def _place_order(contract, order):
+        next_order_id[0] += 1
+        order.orderId = next_order_id[0]
+        placed.append((contract, order))
+        if len(placed) == 1:
+            return _SimpleNamespace(
+                order=order,
+                orderStatus=_SimpleNamespace(
+                    status="Filled", filled=1, avgFillPrice=6.20
+                ),
+            )
+        return _SimpleNamespace(
+            order=order,
+            orderStatus=_SimpleNamespace(
+                status="Submitted", filled=0, avgFillPrice=0.0
+            ),
+        )
+
+    ib.qualifyContractsAsync = _qualify
+    ib.whatIfOrderAsync = _what_if
+    ib.placeOrder = _place_order
+    ib.cancelOrder = lambda o: canceled_orders.append(o)
+
+    tp_order_holder: list = []
+
+    def _open_trades():
+        return [
+            _SimpleNamespace(
+                order=o,
+                orderStatus=_SimpleNamespace(status="Submitted"),
+            )
+            for _, o in placed[1:2]
+        ]
+
+    ib.openTrades = _open_trades
+
+    client = _MagicMock()
+    client.account = "DUP462684"
+    client.settings.mode.is_live = False
+    client.active_trading_ib = ib
+
+    placer = _IBKRPlacer(client=client, walk_interval=0)
+    trade = _make_single_leg_trade(190)
+
+    order_id = await placer(trade)
+    assert order_id == "101"
+    assert trade.tp_order_id == "102"
+
+    # Preflight used direct Option, not BAG
+    assert len(preflight_contracts) == 1
+    assert preflight_contracts[0][0].secType == "OPT"
+    assert preflight_contracts[0][1].action == "SELL"
+    assert preflight_contracts[0][1].lmtPrice == 6.20
+
+    # Opening + TP orders used direct Option with positive prices
+    open_contract, open_order = placed[0]
+    assert open_contract.secType == "OPT"
+    assert open_order.action == "SELL"
+    assert open_order.lmtPrice == 6.20
+
+    tp_contract, tp_order = placed[1]
+    assert tp_contract.secType == "OPT"
+    assert tp_order.action == "BUY"
+    assert tp_order.lmtPrice == 3.10
+    assert tp_order.tif == "GTC"
+
+    # Close uses direct Option with BUY @ +debit and cancels prior TP order
+    close_id = await placer.close(trade, cost_to_close=400.0)
+    assert close_id == "103"
+    assert any(o.orderId == 102 for o in canceled_orders)
+    close_contract, close_order = placed[2]
+    assert close_contract.secType == "OPT"
+    assert close_order.action == "BUY"
+    assert close_order.lmtPrice == 4.00
+
+
+@_pytest.mark.asyncio
+async def test_placer_qualify_timeout_and_failure_raise_runtime_error():
+    ib = _MagicMock()
+    ib.qualifyContractsAsync = _AsyncMock(return_value=[None])
+    client = _MagicMock()
+    client.active_trading_ib = ib
+    placer = _IBKRPlacer(client=client, walk_interval=0)
+    leg = _make_single_leg_trade().legs[0]
+
+    with _pytest.raises(RuntimeError, match="Failed to qualify"):
+        await placer._qualify_leg("IGV", leg)
+
+    async def _hang(_opt):
+        await _asyncio.sleep(5.0)
+
+    ib.qualifyContractsAsync = _hang
+    with _pytest.raises(RuntimeError, match="Timed out qualifying"):
+        await placer._qualify_leg("IGV", leg, timeout=0.02)
+
+
+@_pytest.mark.asyncio
+async def test_placer_error_202_scoped_and_cancellation_cancels_open_order():
+    canceled_orders: list = []
+    ib = _MagicMock()
+    ib.errorEvent = _DummyErrorEvent()
+
+    async def _qualify(opt):
+        opt.conId = 555
+        return [opt]
+
+    async def _what_if(contract, order):
+        return None
+
+    def _place_order(contract, order):
+        order.orderId = 201
+        return _SimpleNamespace(
+            order=order,
+            orderStatus=_SimpleNamespace(
+                status="Submitted", filled=0, avgFillPrice=0.0
+            ),
+        )
+
+    ib.qualifyContractsAsync = _qualify
+    ib.whatIfOrderAsync = _what_if
+    ib.placeOrder = _place_order
+    ib.cancelOrder = lambda o: canceled_orders.append(o)
+
+    client = _MagicMock()
+    client.account = "DUP462684"
+    client.settings.mode.is_live = False
+    client.active_trading_ib = ib
+
+    placer = _IBKRPlacer(client=client, walk_interval=5)
+    trade = _make_single_leg_trade(191)
+
+    task = _asyncio.create_task(placer(trade))
+    await _asyncio.sleep(0.05)
+
+    # Mismatched reqId should NOT disturb current order state
+    ib.errorEvent.emit(9999, 202, "current market price of 5.50", None)
+    assert len(ib.errorEvent.handlers) == 1
+
+    task.cancel()
+    with _pytest.raises(_asyncio.CancelledError):
+        await task
+
+    assert any(o.orderId == 201 for o in canceled_orders)
+    assert len(ib.errorEvent.handlers) == 0

@@ -13,6 +13,7 @@ executor never imports the broker directly, so its routing logic is unit-testabl
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
@@ -48,6 +49,9 @@ class Executor:
             return ExecOutcome(trade.id, trade.symbol, "error", "no placer configured")
         try:
             order_id = await self.placer(trade)
+        except asyncio.CancelledError:
+            self.ledger.cancel_trade(trade, reason="placement canceled during shutdown")
+            raise
         except Exception as e:  # noqa: BLE001 - surface broker errors as outcomes
             self.ledger.cancel_trade(trade, reason=f"placement error: {e}")
             return ExecOutcome(trade.id, trade.symbol, "error", str(e))

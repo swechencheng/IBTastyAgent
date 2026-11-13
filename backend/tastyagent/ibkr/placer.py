@@ -23,9 +23,9 @@ from ..db.models import Trade, TradeLeg
 from .client import IBKRClient
 from .orders import (
     build_closing_tp_order,
-    build_combo_contract,
     build_manual_close_order,
     build_opening_credit_order,
+    build_trade_contract,
     check_margin_preflight,
 )
 
@@ -74,7 +74,9 @@ class IBKRPlacer:
     def ib(self) -> IB:
         return self.client.active_trading_ib
 
-    async def _qualify_leg(self, symbol: str, leg: TradeLeg) -> Option:
+    async def _qualify_leg(
+        self, symbol: str, leg: TradeLeg, *, timeout: float = 10.0
+    ) -> Option:
         """Create and qualify an Option contract for a trade leg."""
         right = "P" if leg.option_type.lower() == "put" else "C"
         exp = _format_expiration(str(leg.expiration))
@@ -86,8 +88,51 @@ class IBKRPlacer:
             exchange="SMART",
             currency="USD",
         )
-        await self.ib.qualifyContractsAsync(opt)
+        try:
+            qualified = await asyncio.wait_for(
+                self.ib.qualifyContractsAsync(opt),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(
+                f"Timed out qualifying option contract {symbol} {exp} {leg.strike}{right}"
+            ) from exc
+        if isinstance(qualified, list) and qualified and qualified[0] is None:
+            raise RuntimeError(
+                f"Failed to qualify option contract {symbol} {exp} {leg.strike}{right}"
+            )
         return opt
+
+    async def _prepare_contract(
+        self, trade: Trade, *, for_close: bool = False
+    ) -> tuple[Contract, bool, str]:
+        """Qualify all trade legs and return (contract, is_combo, single_leg_open_action)."""
+        if not trade.legs:
+            raise RuntimeError(
+                f"Trade #{trade.id} ({trade.symbol}) has no option legs"
+            )
+        leg_pairs: list[tuple[Option, str]] = []
+        for leg in trade.legs:
+            opt = await self._qualify_leg(trade.symbol, leg)
+            if for_close:
+                # Match the opening leg directions so combo closing (SELL BAG) and
+                # single-leg closing (reverse of opening action) align cleanly.
+                action = "SELL" if "sell" in leg.action.lower() else "BUY"
+            else:
+                action = _LEG_ACTION_MAP.get(leg.action, "SELL")
+            leg_pairs.append((opt, action))
+            logger.info(
+                "    Leg: %s %s Strike=%.2f Exp=%s -> %s",
+                opt.symbol,
+                opt.right,
+                opt.strike,
+                opt.lastTradeDateOrContractMonth,
+                action,
+            )
+        contract = build_trade_contract(trade.symbol, leg_pairs)
+        is_combo = len(leg_pairs) > 1
+        single_leg_open_action = leg_pairs[0][1]
+        return contract, is_combo, single_leg_open_action
 
     async def __call__(self, trade: Trade) -> str:
         """Open a position for net credit with walk-the-book and attach Take Profit."""
@@ -100,23 +145,9 @@ class IBKRPlacer:
         )
         logger.info("=" * 60)
 
-        # 1. Qualify all legs
-        leg_pairs: list[tuple[Option, str]] = []
-        for leg in trade.legs:
-            opt = await self._qualify_leg(trade.symbol, leg)
-            action = _LEG_ACTION_MAP.get(leg.action, "SELL")
-            leg_pairs.append((opt, action))
-            logger.info(
-                "    Leg: %s %s Strike=%.2f Exp=%s -> %s",
-                opt.symbol,
-                opt.right,
-                opt.strike,
-                opt.lastTradeDateOrContractMonth,
-                action,
-            )
-
-        # 2. Build BAG contract
-        combo = build_combo_contract(trade.symbol, leg_pairs)
+        # 1-2. Qualify legs & build Contract (direct Option for 1-leg, BAG for combos)
+        contract, is_combo, single_leg_open_action = await self._prepare_contract(trade)
+        contract_kind = "combo" if is_combo else "option"
 
         # 3. Calculate initial credit & floor
         target_credit = trade.entry_credit / (100 * trade.contracts)
@@ -139,14 +170,19 @@ class IBKRPlacer:
             else f"TastyAgent_ROLL_{trade.symbol}"
         )
 
+        def _make_open_order(credit: float) -> LimitOrder:
+            return build_opening_credit_order(
+                trade.contracts,
+                credit,
+                account=self.client.account,
+                order_ref=order_ref,
+                is_combo=is_combo,
+                single_leg_action=single_leg_open_action,
+            )
+
         # 4. Optional Margin Preflight
-        preflight_order = build_opening_credit_order(
-            trade.contracts,
-            current_credit,
-            account=self.client.account,
-            order_ref=order_ref,
-        )
-        await check_margin_preflight(self.ib, combo, preflight_order)
+        preflight_order = _make_open_order(current_credit)
+        await check_margin_preflight(self.ib, contract, preflight_order)
 
         # 4b. Live Cushion Guard check
         is_live = getattr(self.client.settings.mode, "is_live", False)
@@ -165,9 +201,15 @@ class IBKRPlacer:
 
         # 5. Walk-the-book Execution Loop
         rejected_market_price: Optional[float] = None
+        auto_heal_attempts = 0
+        max_auto_heals = 3
+        order = _make_open_order(current_credit)
 
         def _on_error(reqId, errorCode, errorString, err_contract):
             nonlocal rejected_market_price
+            current_order_id = getattr(order, "orderId", None)
+            if current_order_id and reqId != current_order_id:
+                return
             if errorCode == 202:
                 # Error 202: order too aggressive
                 m = re.search(r"current market price of (-?\d+\.?\d*)", errorString)
@@ -180,16 +222,12 @@ class IBKRPlacer:
 
         self.ib.errorEvent += _on_error
 
-        order = build_opening_credit_order(
-            trade.contracts,
-            current_credit,
-            account=self.client.account,
-            order_ref=order_ref,
-        )
-        parent_trade = self.ib.placeOrder(combo, order)
+        parent_trade = self.ib.placeOrder(contract, order)
         logger.info(
-            "  📤 Order #%d submitted: BUY combo @ -$%.2f credit",
-            order.orderId,
+            "  📤 Order #%s submitted: %s %s @ $%.2f credit",
+            getattr(order, "orderId", None),
+            order.action,
+            contract_kind,
             current_credit,
         )
 
@@ -249,16 +287,20 @@ class IBKRPlacer:
                             account=self.client.account,
                             order_ref=f"TastyAgent_TP_{trade.id}",
                             transmit=True,
+                            is_combo=is_combo,
+                            single_leg_open_action=single_leg_open_action,
                         )
-                        tp_trade = self.ib.placeOrder(combo, tp_order)
+                        tp_trade = self.ib.placeOrder(contract, tp_order)
                         assigned_tp_id = (
                             getattr(getattr(tp_trade, "order", None), "orderId", None)
                             or tp_order.orderId
                         )
                         trade.tp_order_id = str(assigned_tp_id)
                         logger.info(
-                            "  🎯 Attached Take-Profit order #%s submitted: SELL combo @ -$%.2f debit (%s)",
+                            "  🎯 Attached Take-Profit order #%s submitted: %s %s @ $%.2f debit (%s)",
                             trade.tp_order_id,
+                            tp_order.action,
+                            contract_kind,
                             tp_debit,
                             target_desc,
                         )
@@ -270,20 +312,19 @@ class IBKRPlacer:
                     if (
                         rejected_market_price is not None
                         and rejected_market_price >= min_credit
+                        and auto_heal_attempts < max_auto_heals
                     ):
+                        auto_heal_attempts += 1
                         current_credit = round(rejected_market_price, 2)
                         rejected_market_price = None
                         logger.info(
-                            "  🔄 Auto-healing: restarting walk-the-book from market price $%.2f",
+                            "  🔄 Auto-healing (%d/%d): restarting walk-the-book from market price $%.2f",
+                            auto_heal_attempts,
+                            max_auto_heals,
                             current_credit,
                         )
-                        order = build_opening_credit_order(
-                            trade.contracts,
-                            current_credit,
-                            account=self.client.account,
-                            order_ref=order_ref,
-                        )
-                        parent_trade = self.ib.placeOrder(combo, order)
+                        order = _make_open_order(current_credit)
+                        parent_trade = self.ib.placeOrder(contract, order)
                         continue
 
                     logger.error(
@@ -310,18 +351,29 @@ class IBKRPlacer:
                 self.ib.cancelOrder(order)
                 await asyncio.sleep(0.5)
 
-                order = build_opening_credit_order(
-                    trade.contracts,
-                    current_credit,
-                    account=self.client.account,
-                    order_ref=order_ref,
-                )
-                parent_trade = self.ib.placeOrder(combo, order)
+                order = _make_open_order(current_credit)
+                parent_trade = self.ib.placeOrder(contract, order)
                 logger.info(
                     "  🔄 Repricing (Cancel/Replace): Limit Credit -> $%.2f",
                     current_credit,
                 )
 
+        except asyncio.CancelledError:
+            logger.warning(
+                "Placement of Trade #%s (%s) interrupted; canceling open broker order #%s",
+                trade.id,
+                trade.symbol,
+                getattr(order, "orderId", None),
+            )
+            try:
+                cur_status = getattr(
+                    getattr(parent_trade, "orderStatus", None), "status", ""
+                )
+                if cur_status not in ("Filled", "Cancelled", "ApiCancelled", "Inactive"):
+                    self.ib.cancelOrder(order)
+            except Exception as cancel_err:
+                logger.debug("Best-effort cancelOrder failed during cancellation: %s", cancel_err)
+            raise
         finally:
             self.ib.errorEvent -= _on_error
 
@@ -362,16 +414,11 @@ class IBKRPlacer:
         )
         logger.info("=" * 60)
 
-        # 1. Qualify all legs
-        leg_pairs: list[tuple[Option, str]] = []
-        for leg in trade.legs:
-            opt = await self._qualify_leg(trade.symbol, leg)
-            # Match the combo definition with opening legs (SELL short legs, BUY long legs).
-            # Selling this BAG at -debit closes the position, matching build_closing_tp_order.
-            action = "SELL" if "sell" in leg.action.lower() else "BUY"
-            leg_pairs.append((opt, action))
-
-        combo = build_combo_contract(trade.symbol, leg_pairs)
+        # 1. Qualify all legs & build Contract (Option for 1-leg, BAG for combos)
+        contract, is_combo, single_leg_open_action = await self._prepare_contract(
+            trade, for_close=True
+        )
+        contract_kind = "combo" if is_combo else "option"
         debit_per_share = round(float(cost_to_close) / (100 * trade.contracts), 2)
         order_ref = f"TastyAgent_CLOSE_{trade.id}"
 
@@ -390,9 +437,14 @@ class IBKRPlacer:
             debit_per_share,
             account=self.client.account,
             order_ref=order_ref,
+            is_combo=is_combo,
+            single_leg_open_action=single_leg_open_action,
         )
-        close_trade = self.ib.placeOrder(combo, order)
+        close_trade = self.ib.placeOrder(contract, order)
         logger.info(
-            "  📤 Close order submitted: SELL combo @ -$%.2f debit", debit_per_share
+            "  📤 Close order submitted: %s %s @ $%.2f debit",
+            order.action,
+            contract_kind,
+            debit_per_share,
         )
         return str(close_trade.order.orderId)

@@ -270,3 +270,146 @@ def test_reconcile_closing_orders_tp_fill():
     assert t.exit_debit == 100.0
     assert t.realized_pnl == 100.0
     assert "Take-profit order filled" in t.exit_reason
+
+
+from datetime import datetime as _datetime, timedelta as _timedelta, timezone as _timezone
+from types import SimpleNamespace as _SimpleNamespace
+from unittest.mock import MagicMock as _MagicMock
+import pytest as _pytest
+from tastyagent.config import TradingMode as _TradingMode
+from tastyagent.db.models import Trade as _Trade, TradeStatus as _TradeStatus
+from tastyagent.db.session import in_memory_session as _in_memory_session
+from tastyagent.execution.tracker import (
+    reconcile_stale_working_trades as _reconcile_stale_working_trades,
+    sync_positions_and_marks as _sync_positions_and_marks,
+)
+from tastyagent.portfolio.ledger import Ledger as _Ledger
+
+
+def test_reconcile_stale_working_trades_cancels_orphans_and_preserves_valid_trades():
+    sess = _in_memory_session()
+    ledger = _Ledger(sess)
+    now = _datetime(2026, 11, 13, 15, 0, 0, tzinfo=_timezone.utc)
+
+    # 1. Old orphan (no broker_order_id, no broker order, no position) -> CANCELED
+    t_orphan = _Trade(
+        symbol="IGV",
+        strategy="naked_put",
+        contracts=1,
+        status=_TradeStatus.WORKING,
+        mode=_TradingMode.SANDBOX,
+        broker_order_id=None,
+        created_at=now - _timedelta(minutes=20),
+    )
+    # 2. Fresh in-flight placement (created 30s ago) -> preserved
+    t_fresh = _Trade(
+        symbol="AAPL",
+        strategy="naked_put",
+        contracts=1,
+        status=_TradeStatus.WORKING,
+        mode=_TradingMode.SANDBOX,
+        broker_order_id=None,
+        created_at=now - _timedelta(seconds=30),
+    )
+    # 3. Real working order (has broker_order_id) -> preserved
+    t_with_id = _Trade(
+        symbol="MSFT",
+        strategy="put_credit_spread",
+        contracts=1,
+        status=_TradeStatus.WORKING,
+        mode=_TradingMode.SANDBOX,
+        broker_order_id="12345",
+        created_at=now - _timedelta(hours=1),
+    )
+    # 4. Working order matched on broker by orderRef -> preserved
+    t_broker_ref = _Trade(
+        symbol="NVDA",
+        strategy="put_credit_spread",
+        contracts=1,
+        status=_TradeStatus.WORKING,
+        mode=_TradingMode.SANDBOX,
+        broker_order_id=None,
+        created_at=now - _timedelta(hours=1),
+    )
+    # 5. Working trade whose symbol already has an open OPT position -> preserved
+    t_with_pos = _Trade(
+        symbol="TSLA",
+        strategy="naked_put",
+        contracts=1,
+        status=_TradeStatus.WORKING,
+        mode=_TradingMode.SANDBOX,
+        broker_order_id=None,
+        created_at=now - _timedelta(hours=1),
+    )
+    sess.add_all([t_orphan, t_fresh, t_with_id, t_broker_ref, t_with_pos])
+    sess.flush()
+
+    ib_trades = [
+        _SimpleNamespace(
+            order=_SimpleNamespace(orderId=999, orderRef=f"TastyAgent_{t_broker_ref.id}"),
+            orderStatus=_SimpleNamespace(status="Submitted"),
+        )
+    ]
+    positions = [
+        _SimpleNamespace(
+            contract=_SimpleNamespace(symbol="TSLA", secType="OPT"),
+            position=-1,
+        )
+    ]
+
+    canceled = _reconcile_stale_working_trades(
+        ledger,
+        ib_trades=ib_trades,
+        positions=positions,
+        stale_after_seconds=600.0,
+        now=now,
+    )
+
+    assert canceled == 1
+    assert t_orphan.status == _TradeStatus.CANCELED
+    assert t_fresh.status == _TradeStatus.WORKING
+    assert t_with_id.status == _TradeStatus.WORKING
+    assert t_broker_ref.status == _TradeStatus.WORKING
+    assert t_with_pos.status == _TradeStatus.WORKING
+
+
+@_pytest.mark.asyncio
+async def test_sync_positions_and_marks_cleans_stale_working_trades():
+    sess = _in_memory_session()
+    old_utc = _datetime.now(_timezone.utc) - _timedelta(minutes=30)
+    fresh_utc = _datetime.now(_timezone.utc) - _timedelta(seconds=10)
+
+    t_stale = _Trade(
+        symbol="IGV",
+        strategy="naked_put",
+        contracts=1,
+        status=_TradeStatus.WORKING,
+        mode=_TradingMode.SANDBOX,
+        broker_order_id=None,
+        created_at=old_utc,
+    )
+    t_fresh = _Trade(
+        symbol="QQQ",
+        strategy="naked_put",
+        contracts=1,
+        status=_TradeStatus.WORKING,
+        mode=_TradingMode.SANDBOX,
+        broker_order_id=None,
+        created_at=fresh_utc,
+    )
+    sess.add_all([t_stale, t_fresh])
+    sess.commit()
+
+    active_ib = _MagicMock()
+    active_ib.isConnected.return_value = True
+    active_ib.trades.return_value = []
+    active_ib.positions.return_value = []
+    active_ib.portfolio.return_value = []
+
+    client = _MagicMock()
+    client.active_trading_ib = active_ib
+
+    await _sync_positions_and_marks(client=client, session=sess)
+
+    assert t_stale.status == _TradeStatus.CANCELED
+    assert t_fresh.status == _TradeStatus.WORKING

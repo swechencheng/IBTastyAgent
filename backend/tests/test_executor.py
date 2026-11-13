@@ -123,3 +123,70 @@ def test_tracker_cancels_dead_order():
     lg.mark_working(t, "ORD9")
     reconcile_fills(lg, {"ORD9": "Rejected"})
     assert t.status is TradeStatus.CANCELED
+
+
+import asyncio as _asyncio
+from datetime import date as _date
+import pytest as _pytest
+from tastyagent.config import TradingMode as _TradingMode
+from tastyagent.db.models import TradeStatus as _TradeStatus
+from tastyagent.db.session import in_memory_session as _in_memory_session
+from tastyagent.execution.executor import Executor as _Executor
+from tastyagent.models import (
+    Action as _Action,
+    CandidateTrade as _CandidateTrade,
+    Leg as _Leg,
+    Liquidity as _Liquidity,
+    OptionType as _OptionType,
+    Strategy as _Strategy,
+)
+from tastyagent.portfolio.ledger import Ledger as _Ledger
+
+
+@_pytest.mark.asyncio
+async def test_executor_place_cancels_trade_on_asyncio_cancelled_error():
+    sess = _in_memory_session()
+    ledger = _Ledger(sess)
+    candidate = _CandidateTrade(
+        symbol="IGV",
+        strategy=_Strategy.NAKED_PUT,
+        legs=(
+            _Leg(
+                option_type=_OptionType.PUT,
+                strike=94.0,
+                expiration=_date(2026, 12, 18),
+                action=_Action.SELL_TO_OPEN,
+                delta=-0.30,
+            ),
+        ),
+        dte=44,
+        net_credit=6.20,
+        max_profit=620.0,
+        max_loss=8780.0,
+        buying_power_reduction=1800.0,
+        underlying_price=105.0,
+        iv_rank=0.4,
+        liquidity=_Liquidity(bid_ask_width_pct=0.05, open_interest=100, daily_volume=20),
+    )
+    trade = ledger.record_planned(
+        candidate, contracts=1, rationale="test", mode=_TradingMode.SANDBOX
+    )
+
+    async def _canceling_placer(_trade):
+        raise _asyncio.CancelledError()
+
+    executor = _Executor(
+        ledger=ledger,
+        mode=_TradingMode.SANDBOX,
+        placer=_canceling_placer,
+    )
+
+    with _pytest.raises(_asyncio.CancelledError):
+        await executor._place(trade)
+
+    assert trade.status == _TradeStatus.CANCELED
+    assert trade.exit_reason == "placement canceled during shutdown"
+    assert [t.id for t in ledger.open_trades()] == []
+    assert any(
+        ev.kind == "canceled" and "shutdown" in ev.detail for ev in trade.events
+    )

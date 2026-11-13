@@ -448,9 +448,6 @@ def create_app(
         port = _get_active_portfolio_items()
         tickers = _get_active_tickers_map()
         return [_enrich_trade_out(t, port, tickers) for t in Ledger(s).open_trades()]
-    def positions(s: Session = Depends(get_session)) -> list[TradeOut]:
-        port = _get_active_portfolio_items()
-        return [_enrich_trade_out(t, port) for t in Ledger(s).open_trades()]
 
     @app.get("/api/trades/closed", response_model=list[TradeOut])
     def closed(s: Session = Depends(get_session)) -> list[TradeOut]:
@@ -832,15 +829,67 @@ def create_app(
 
     @app.on_event("startup")
     async def _on_startup() -> None:
+        logger = logging.getLogger("tastyagent.api")
         if app.state.client is not None and hasattr(app.state.client, "connect"):
             try:
                 await app.state.client.connect()
             except Exception as e:
-                logging.getLogger("tastyagent.api").warning(
-                    "IBKR connection failed on startup: %s", e
-                )
+                logger.warning("IBKR connection failed on startup: %s", e)
             if hasattr(app.state.client, "start_connection_monitor"):
                 app.state.client.start_connection_monitor()
+
+        # Reconcile interrupted/orphaned WORKING trades left over from previous runs
+        ib_trades: list = []
+        positions: list = []
+        broker_ok = False
+        client = app.state.client
+        active_ib = getattr(client, "active_trading_ib", None) if client is not None else None
+        if active_ib is not None:
+            try:
+                if active_ib.isConnected() is not False:
+                    ib_trades = active_ib.trades()
+                    positions = active_ib.positions()
+                    broker_ok = True
+            except Exception as e:
+                logger.warning("Startup IBKR state fetch failed: %s", e)
+
+        gen = get_session()
+        try:
+            s = next(gen)
+            from ..execution.tracker import (
+                reconcile_closing_orders,
+                reconcile_fills,
+                reconcile_positions_from_broker,
+                reconcile_stale_working_trades,
+            )
+
+            ledger = Ledger(s)
+            if broker_ok:
+                status_map = {
+                    str(t.order.orderId): t.orderStatus.status
+                    for t in ib_trades
+                    if getattr(t, "order", None) is not None
+                }
+                reconcile_fills(ledger, status_map)
+                reconcile_closing_orders(ledger, ib_trades, active_ib)
+                reconcile_positions_from_broker(ledger, positions)
+
+            canceled = reconcile_stale_working_trades(
+                ledger,
+                ib_trades=ib_trades,
+                positions=positions,
+                stale_after_seconds=0.0,
+            )
+            s.commit()
+            if canceled:
+                logger.info(
+                    "Startup reconciliation canceled %d orphaned WORKING trade(s)",
+                    canceled,
+                )
+        except Exception as e:
+            logger.warning("Startup trade reconciliation failed: %s", e)
+        finally:
+            gen.close()
 
         # Start 5-minute position mark & PnL polling loop
         app.state.pnl_poll_running = True

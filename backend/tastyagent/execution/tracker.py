@@ -8,12 +8,88 @@ to the ledger.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import logging
 from typing import Any, Callable, Optional
 
 from ..db.models import EquitySnapshot, Trade, TradeStatus
 from ..portfolio.ledger import Ledger
 from ..portfolio.pnl import summarize
+
+
+def _as_utc(dt: datetime) -> datetime:
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _has_matching_broker_order(
+    trade: Trade, ib_trades: Optional[list[Any]]
+) -> bool:
+    """Return True if broker reports a non-canceled order matching this trade's orderRef."""
+    if not ib_trades:
+        return False
+    expected_ref = trade.order_ref or (
+        f"TastyAgent_{trade.id}" if trade.id is not None else ""
+    )
+    if not expected_ref:
+        return False
+    for bt in ib_trades:
+        order = getattr(bt, "order", None)
+        ref = getattr(order, "orderRef", "") or ""
+        if ref == expected_ref:
+            status = getattr(getattr(bt, "orderStatus", None), "status", "")
+            if status not in ("Cancelled", "ApiCancelled", "Inactive"):
+                return True
+    return False
+
+
+def _has_matching_broker_position(
+    trade: Trade, positions: Optional[list[Any]]
+) -> bool:
+    """Return True if any non-zero broker option position exists for this trade's symbol."""
+    if not positions:
+        return False
+    for pos in positions:
+        contract = getattr(pos, "contract", None)
+        qty = getattr(pos, "position", 0) or 0
+        if (
+            qty != 0
+            and getattr(contract, "symbol", None) == trade.symbol
+            and getattr(contract, "secType", None) == "OPT"
+        ):
+            return True
+    return False
+
+
+def reconcile_stale_working_trades(
+    ledger: Ledger,
+    ib_trades: Optional[list[Any]] = None,
+    positions: Optional[list[Any]] = None,
+    *,
+    stale_after_seconds: float = 600.0,
+    now: Optional[datetime] = None,
+) -> int:
+    """Cancel orphaned WORKING trades that never received a broker_order_id."""
+    current_time = _as_utc(now) if now is not None else datetime.now(timezone.utc)
+    canceled = 0
+    for trade in ledger.open_trades():
+        if trade.status != TradeStatus.WORKING or trade.broker_order_id:
+            continue
+        if _has_matching_broker_order(trade, ib_trades):
+            continue
+        if _has_matching_broker_position(trade, positions):
+            continue
+        age_seconds = (current_time - _as_utc(trade.created_at)).total_seconds()
+        if age_seconds < stale_after_seconds:
+            continue
+        ledger.cancel_trade(
+            trade,
+            reason=(
+                "stale WORKING trade with no broker_order_id "
+                f"(age={int(age_seconds)}s)"
+            ),
+        )
+        canceled += 1
+    return canceled
 
 logger = logging.getLogger(__name__)
 
@@ -294,6 +370,10 @@ async def sync_positions_and_marks(
     if active_ib is None or not active_ib.isConnected():
         return {"reconciled": 0, "marks_updated": 0, "error": "IBKR not connected"}
 
+    ib_trades: list[Any] = []
+    positions: list[Any] = []
+    positions_ok = False
+
     # 1. Reconcile fills from active trades & order statuses
     try:
         ib_trades = active_ib.trades()
@@ -306,9 +386,22 @@ async def sync_positions_and_marks(
     # 2. Reconcile working trades against current positions
     try:
         positions = active_ib.positions()
+        positions_ok = True
         reconcile_positions_from_broker(ledger, positions)
     except Exception as e:
         logger.debug("reconcile_positions_from_broker failed: %s", e)
+
+    # 2b. Cancel orphaned WORKING trades stuck without broker_order_id
+    if positions_ok:
+        try:
+            reconcile_stale_working_trades(
+                ledger,
+                ib_trades=ib_trades,
+                positions=positions,
+                stale_after_seconds=600.0,
+            )
+        except Exception as e:
+            logger.debug("reconcile_stale_working_trades failed: %s", e)
 
     # 3. Calculate marks from broker portfolio
     combined_portfolio = list(active_ib.portfolio()) if active_ib else []
