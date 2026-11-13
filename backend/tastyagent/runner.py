@@ -45,16 +45,19 @@ from .portfolio.watchlist import WatchlistRepo
 from .ibkr.metrics import get_iv_metrics
 from .strategy.candidates import (
     _parse_exp_date,
+    _select_spread_pair,
     build_credit_spread_candidate,
     build_iron_condor_candidate,
     build_naked_put_candidate,
     build_strangle_candidate,
     generate_candidates,
     pick_expiration,
-    select_spread_long_option,
 )
 from .strategy.exits import RollKind
-from .strategy.guardrails import validate_candidate
+from .strategy.guardrails import (
+    INDEX_OR_ETF_SYMBOLS,
+    validate_roll_candidate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -174,10 +177,130 @@ async def _live_mark(client: IBKRClient, trade: Trade) -> PositionMark:
     )
 
 
+def _find_trade_leg(
+    trade: Trade, option_type: str, action_substr: str
+) -> Optional[TradeLeg]:
+    for leg in trade.legs:
+        if (
+            leg.option_type.lower() == option_type
+            and action_substr in leg.action.lower()
+        ):
+            return leg
+    return None
+
+
+def _trade_strike_width(trade: Trade) -> Optional[float]:
+    """Return defined-risk max wing width for a Trade, or None if undefined risk."""
+    sp = _find_trade_leg(trade, "put", "sell")
+    lp = _find_trade_leg(trade, "put", "buy")
+    sc = _find_trade_leg(trade, "call", "sell")
+    lc = _find_trade_leg(trade, "call", "buy")
+    widths = []
+    if sp and lp:
+        widths.append(abs(float(sp.strike) - float(lp.strike)))
+    if sc and lc:
+        widths.append(abs(float(sc.strike) - float(lc.strike)))
+    return max(widths) if widths else None
+
+
+def _match_contract_strike(
+    options: list[Option], target_strike: float
+) -> Optional[Option]:
+    exact = [
+        o for o in options if round(float(o.strike), 2) == round(target_strike, 2)
+    ]
+    if exact:
+        return exact[0]
+    return min(
+        options, key=lambda o: abs(float(o.strike) - target_strike), default=None
+    )
+
+
+def _build_same_strike_roll_out(
+    trade: Trade,
+    sym: str,
+    underlying: float,
+    iv_rank: float,
+    dte: int,
+    puts: list[Option],
+    calls: list[Option],
+    snaps: dict,
+):
+    """Rebuild the same strikes in a later expiration when delta-target roll fails credit."""
+    strat_str = str(getattr(trade.strategy, "value", trade.strategy)).lower()
+    sp_leg = _find_trade_leg(trade, "put", "sell")
+    lp_leg = _find_trade_leg(trade, "put", "buy")
+    sc_leg = _find_trade_leg(trade, "call", "sell")
+    lc_leg = _find_trade_leg(trade, "call", "buy")
+
+    def sn(o: Optional[Option]):
+        return snaps.get(o.conId) if o else None
+
+    if strat_str == "put_credit_spread" and sp_leg and lp_leg:
+        p_s = _match_contract_strike(puts, float(sp_leg.strike))
+        p_l = _match_contract_strike(puts, float(lp_leg.strike))
+        if p_s and p_l and sn(p_s) and sn(p_l) and p_l.strike < p_s.strike:
+            return build_credit_spread_candidate(
+                sym,
+                underlying,
+                iv_rank,
+                dte,
+                p_s,
+                p_l,
+                sn(p_s),
+                sn(p_l),
+                option_type=OptionType.PUT,
+                strategy=Strategy.PUT_CREDIT_SPREAD,
+            )
+    elif strat_str == "call_credit_spread" and sc_leg and lc_leg:
+        c_s = _match_contract_strike(calls, float(sc_leg.strike))
+        c_l = _match_contract_strike(calls, float(lc_leg.strike))
+        if c_s and c_l and sn(c_s) and sn(c_l) and c_l.strike > c_s.strike:
+            return build_credit_spread_candidate(
+                sym,
+                underlying,
+                iv_rank,
+                dte,
+                c_s,
+                c_l,
+                sn(c_s),
+                sn(c_l),
+                option_type=OptionType.CALL,
+                strategy=Strategy.CALL_CREDIT_SPREAD,
+            )
+    elif strat_str == "naked_put" and sp_leg:
+        p_s = _match_contract_strike(puts, float(sp_leg.strike))
+        if p_s and sn(p_s):
+            return build_naked_put_candidate(sym, underlying, iv_rank, dte, p_s, sn(p_s))
+    elif strat_str == "iron_condor" and sp_leg and lp_leg and sc_leg and lc_leg:
+        p_s = _match_contract_strike(puts, float(sp_leg.strike))
+        p_l = _match_contract_strike(puts, float(lp_leg.strike))
+        c_s = _match_contract_strike(calls, float(sc_leg.strike))
+        c_l = _match_contract_strike(calls, float(lc_leg.strike))
+        if (
+            p_s
+            and p_l
+            and c_s
+            and c_l
+            and p_l.strike < p_s.strike < c_s.strike < c_l.strike
+        ):
+            return build_iron_condor_candidate(
+                sym, underlying, iv_rank, dte, p_s, p_l, c_s, c_l, snaps
+            )
+    elif strat_str == "short_strangle" and sp_leg and sc_leg:
+        p_s = _match_contract_strike(puts, float(sp_leg.strike))
+        c_s = _match_contract_strike(calls, float(sc_leg.strike))
+        if p_s and c_s and sn(p_s) and sn(c_s) and p_s.strike < c_s.strike:
+            return build_strangle_candidate(
+                sym, underlying, iv_rank, dte, p_s, c_s, sn(p_s), sn(c_s)
+            )
+    return None
+
+
 async def _build_roll_candidate(
     client: IBKRClient, trade: Trade, roll_kind: RollKind, mark: PositionMark, params
 ):
-    """Build the replacement strangle for a roll."""
+    """Build the replacement trade for a roll (OUT or UNTESTED)."""
     sym = trade.symbol
     today = date.today()
     raw_exps, strikes = await get_option_chain_parameters(client.data_ib, sym)
@@ -236,137 +359,161 @@ async def _build_roll_candidate(
 
         dte = (exp_date - today).days
         strat_str = str(getattr(trade.strategy, "value", trade.strategy)).lower()
+        is_index = sym.upper() in INDEX_OR_ETF_SYMBOLS
+        spread_target = getattr(params, "spread_target_short_delta", 0.30)
+        spread_cap = getattr(params, "spread_max_short_leg_delta", 0.35)
+        min_put_ratio = params.min_credit_width_ratio
+        min_call_ratio = (
+            getattr(params, "index_call_min_credit_width_ratio", 0.20)
+            if is_index
+            else params.min_credit_width_ratio
+        )
+        orig_width = _trade_strike_width(trade)
+        max_loss_cap = orig_width * 100.0 if orig_width is not None else None
 
+        fresh = None
         if strat_str == "put_credit_spread":
-            p_short = select_by_delta(puts, snaps, params.target_short_delta)
-            if not p_short:
-                return None
-            p_long = select_spread_long_option(
-                p_short,
+            p_short, p_long = _select_spread_pair(
+                puts,
                 puts,
                 snaps,
                 is_put=True,
-                min_ratio=params.min_credit_width_ratio,
+                target_delta=spread_target,
+                max_delta=spread_cap,
+                min_ratio=min_put_ratio,
                 fallback_delta=params.spread_long_delta,
+                max_max_loss=max_loss_cap,
             )
-            if not p_long:
-                return None
-            sp_s, sp_l = snaps.get(p_short.conId), snaps.get(p_long.conId)
-            if not sp_s or not sp_l:
-                return None
-            return build_credit_spread_candidate(
-                sym,
-                underlying,
-                iv_rank,
-                dte,
-                p_short,
-                p_long,
-                sp_s,
-                sp_l,
-                option_type=OptionType.PUT,
-                strategy=Strategy.PUT_CREDIT_SPREAD,
-            )
+            sp_s = snaps.get(p_short.conId) if p_short else None
+            sp_l = snaps.get(p_long.conId) if p_long else None
+            if p_short and p_long and sp_s and sp_l and p_long.strike < p_short.strike:
+                fresh = build_credit_spread_candidate(
+                    sym,
+                    underlying,
+                    iv_rank,
+                    dte,
+                    p_short,
+                    p_long,
+                    sp_s,
+                    sp_l,
+                    option_type=OptionType.PUT,
+                    strategy=Strategy.PUT_CREDIT_SPREAD,
+                )
 
         elif strat_str == "call_credit_spread":
-            is_index = sym.upper() in {"SPX", "SPY", "QQQ", "IWM", "DIA"}
-            min_call_ratio = (
-                getattr(params, "index_call_min_credit_width_ratio", 0.20)
-                if is_index
-                else params.min_credit_width_ratio
-            )
-            c_short = select_by_delta(calls, snaps, params.target_short_delta)
-            if not c_short:
-                return None
-            c_long = select_spread_long_option(
-                c_short,
+            c_short, c_long = _select_spread_pair(
+                calls,
                 calls,
                 snaps,
                 is_put=False,
+                target_delta=spread_target,
+                max_delta=spread_cap,
                 min_ratio=min_call_ratio,
                 fallback_delta=params.spread_long_delta,
+                max_max_loss=max_loss_cap,
             )
-            if not c_long:
-                return None
-            sc_s, sc_l = snaps.get(c_short.conId), snaps.get(c_long.conId)
-            if not sc_s or not sc_l:
-                return None
-            return build_credit_spread_candidate(
-                sym,
-                underlying,
-                iv_rank,
-                dte,
-                c_short,
-                c_long,
-                sc_s,
-                sc_l,
-                option_type=OptionType.CALL,
-                strategy=Strategy.CALL_CREDIT_SPREAD,
-            )
+            sc_s = snaps.get(c_short.conId) if c_short else None
+            sc_l = snaps.get(c_long.conId) if c_long else None
+            if c_short and c_long and sc_s and sc_l and c_long.strike > c_short.strike:
+                fresh = build_credit_spread_candidate(
+                    sym,
+                    underlying,
+                    iv_rank,
+                    dte,
+                    c_short,
+                    c_long,
+                    sc_s,
+                    sc_l,
+                    option_type=OptionType.CALL,
+                    strategy=Strategy.CALL_CREDIT_SPREAD,
+                )
 
         elif strat_str == "naked_put":
             p_short = select_by_delta(puts, snaps, params.target_short_delta)
-            if not p_short:
-                return None
-            sp_s = snaps.get(p_short.conId)
-            if not sp_s:
-                return None
-            return build_naked_put_candidate(sym, underlying, iv_rank, dte, p_short, sp_s)
+            sp_s = snaps.get(p_short.conId) if p_short else None
+            if p_short and sp_s:
+                fresh = build_naked_put_candidate(
+                    sym, underlying, iv_rank, dte, p_short, sp_s
+                )
 
         elif strat_str == "iron_condor":
-            p_short = select_by_delta(puts, snaps, params.target_short_delta)
-            c_short = select_by_delta(calls, snaps, params.target_short_delta)
-            if not p_short or not c_short:
-                return None
-            p_long = select_spread_long_option(
-                p_short,
+            p_short, p_long = _select_spread_pair(
+                puts,
                 puts,
                 snaps,
                 is_put=True,
-                min_ratio=params.min_credit_width_ratio,
+                target_delta=spread_target,
+                max_delta=spread_cap,
+                min_ratio=min_put_ratio,
                 fallback_delta=params.spread_long_delta,
+                max_max_loss=max_loss_cap,
             )
-            c_long = select_spread_long_option(
-                c_short,
+            c_short, c_long = _select_spread_pair(
+                calls,
                 calls,
                 snaps,
                 is_put=False,
-                min_ratio=params.min_credit_width_ratio,
+                target_delta=spread_target,
+                max_delta=spread_cap,
+                min_ratio=min_call_ratio,
                 fallback_delta=params.spread_long_delta,
+                max_max_loss=max_loss_cap,
             )
-            if not p_long or not c_long:
-                return None
-            sp_s, sc_s = snaps.get(p_short.conId), snaps.get(c_short.conId)
-            sp_l, sc_l = snaps.get(p_long.conId), snaps.get(c_long.conId)
-            if not sp_s or not sc_s or not sp_l or not sc_l:
-                return None
-            return build_iron_condor_candidate(
-                sym,
-                underlying,
-                iv_rank,
-                dte,
-                p_short,
-                c_short,
-                p_long,
-                c_long,
-                sp_s,
-                sc_s,
-                sp_l,
-                sc_l,
-            )
+            if (
+                p_short
+                and p_long
+                and c_short
+                and c_long
+                and p_long.strike < p_short.strike < c_short.strike < c_long.strike
+            ):
+                fresh = build_iron_condor_candidate(
+                    sym,
+                    underlying,
+                    iv_rank,
+                    dte,
+                    p_short,
+                    p_long,
+                    c_short,
+                    c_long,
+                    snaps,
+                )
 
         else:
             p = select_by_delta(puts, snaps, params.target_short_delta)
             c = select_by_delta(calls, snaps, params.target_short_delta)
-            if not p or not c:
-                return None
+            sp = snaps.get(p.conId) if p else None
+            sc = snaps.get(c.conId) if c else None
+            if p and c and sp and sc and p.strike < c.strike:
+                fresh = build_strangle_candidate(
+                    sym, underlying, iv_rank, dte, p, c, sp, sc
+                )
 
-            sp, sc = snaps.get(p.conId), snaps.get(c.conId)
-            if not sp or not sc:
-                return None
-
-            return build_strangle_candidate(
-                sym, underlying, iv_rank, dte, p, c, sp, sc
+        contracts_n = max(1, trade.contracts or 1)
+        fresh_ok = (
+            fresh is not None
+            and fresh.net_credit * contracts_n >= mark.cost_to_close
+            and (
+                orig_width is None
+                or fresh.strike_width is None
+                or fresh.strike_width <= orig_width + 1e-6
             )
+        )
+        if fresh_ok:
+            return fresh
+
+        # If a fresh delta-reset roll fails net-credit or expands wings (common when tested/ITM),
+        # preserve original strikes in the next cycle to collect time value without expanding risk.
+        same_strike = _build_same_strike_roll_out(
+            trade, sym, underlying, iv_rank, dte, puts, calls, snaps
+        )
+        if same_strike is not None and (
+            orig_width is None
+            or same_strike.strike_width is None
+            or same_strike.strike_width <= orig_width + 1e-6
+        ):
+            if fresh is None or same_strike.net_credit >= fresh.net_credit:
+                return same_strike
+        return fresh
 
     if roll_kind is RollKind.UNTESTED:
         short_puts = [
@@ -466,7 +613,13 @@ async def _build_roll_candidate(
                 lp_candidates = [p for p in puts if round(p.strike, 2) == new_lp_strike]
                 if not lp_candidates:
                     lp_candidates = sorted(
-                        puts, key=lambda p: abs(p.strike - new_lp_strike)
+                        (
+                            p
+                            for p in puts
+                            if p.strike < new_sp.strike
+                            and (new_sp.strike - p.strike) <= put_width + 1e-6
+                        ),
+                        key=lambda p: abs(p.strike - new_lp_strike),
                     )
                 if not lp_candidates:
                     return None
@@ -515,7 +668,13 @@ async def _build_roll_candidate(
                 ]
                 if not lc_candidates:
                     lc_candidates = sorted(
-                        calls, key=lambda c: abs(c.strike - new_lc_strike)
+                        (
+                            c
+                            for c in calls
+                            if c.strike > new_sc.strike
+                            and (c.strike - new_sc.strike) <= call_width + 1e-6
+                        ),
+                        key=lambda c: abs(c.strike - new_lc_strike),
                     )
                 if not lc_candidates:
                     return None
@@ -622,24 +781,25 @@ async def run_one_cycle(
             if new_cand is None or new_cand.net_credit <= 0:
                 return None
 
-            # Re-validate replacement candidate against entry guardrails
-            gr = validate_candidate(new_cand, params)
+            orig_exp = min(
+                (leg.expiration for leg in trade.legs), default=date.today()
+            )
+            orig_dte = max(0, (_parse_exp_date(orig_exp) - date.today()).days)
+            orig_width = _trade_strike_width(trade)
+            gr = validate_roll_candidate(
+                new_cand,
+                roll_kind=roll_kind.value,
+                exit_debit_total=mark.cost_to_close,
+                contracts=trade.contracts,
+                original_dte_remaining=orig_dte,
+                original_strike_width=orig_width,
+                params=params,
+            )
             if not gr.ok:
                 logger.warning(
-                    "Roll candidate for Trade #%s rejected by guardrails: %s; skipping roll",
+                    "Roll candidate for Trade #%s rejected by roll guardrails: %s; skipping roll",
                     trade.id,
                     "; ".join(gr.violations),
-                )
-                return None
-
-            if (
-                roll_kind is RollKind.UNTESTED
-                and new_cand.net_credit < mark.cost_to_close
-            ):
-                logger.info(
-                    "Roll untested candidate credit $%.2f < cost to close $%.2f; skipping roll",
-                    new_cand.net_credit,
-                    mark.cost_to_close,
                 )
                 return None
             await placer.close(trade, mark.cost_to_close)
@@ -747,7 +907,14 @@ async def run_one_cycle(
             ", ".join(top_symbols) if top_symbols else "none",
         )
         candidates = await generate_candidates(
-            client, metrics_session, params, top_symbols, metrics=metrics
+            client,
+            metrics_session,
+            params,
+            top_symbols,
+            metrics=metrics,
+            max_trade_bp=(
+                limits.max_trade_bp_pct * net_liq if net_liq > 0 else None
+            ),
         )
         logger.info(
             "Candidate generation complete: %d candidate trades found across %d symbols",

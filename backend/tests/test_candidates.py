@@ -207,3 +207,61 @@ def test_iron_condor_candidate():
     assert round(c.strike_width, 2) == 5.0
     assert round(c.credit_width_ratio, 3) == 0.340
     assert validate_candidate(c, PARAMS).ok
+
+
+def test_select_spread_long_option_respects_max_max_loss():
+    from tastyagent.strategy.candidates import select_spread_long_option
+
+    short_opt = SimpleNamespace(conId=100, strike=100.0)
+    # 95 wing: width 5, credit 1.40 -> ratio 0.28, max_loss = 360 <= 500 (affordable)
+    # 90 wing: width 10, credit 3.00 -> ratio 0.30 (closer to midpoint 0.30!), max_loss = 700 > 500
+    l95 = SimpleNamespace(conId=95, strike=95.0)
+    l90 = SimpleNamespace(conId=90, strike=90.0)
+    snaps = {
+        100: OptionSnapshot(con_id=100, bid=Decimal("3.95"), ask=Decimal("4.05"), delta=-0.30),
+        95: OptionSnapshot(con_id=95, bid=Decimal("2.55"), ask=Decimal("2.65"), delta=-0.18),
+        90: OptionSnapshot(con_id=90, bid=Decimal("0.95"), ask=Decimal("1.05"), delta=-0.08),
+    }
+    picked = select_spread_long_option(
+        short_opt, [l95, l90], snaps, is_put=True, max_max_loss=500.0
+    )
+    assert picked is not None
+    assert picked.strike == 95.0
+
+    # If budget is below all available wings, returns None cleanly
+    assert (
+        select_spread_long_option(
+            short_opt, [l95, l90], snaps, is_put=True, max_max_loss=200.0
+        )
+        is None
+    )
+
+
+def test_select_spread_pair_targets_spread_delta_and_finds_ratio():
+    from tastyagent.strategy.candidates import _select_spread_pair
+
+    p25 = SimpleNamespace(conId=25, strike=92.0)
+    p30 = SimpleNamespace(conId=30, strike=95.0)
+    p18 = SimpleNamespace(conId=18, strike=85.0)
+    p15 = SimpleNamespace(conId=15, strike=80.0)
+    puts = [p15, p18, p25, p30]
+    snaps = {
+        30: OptionSnapshot(con_id=30, bid=Decimal("2.95"), ask=Decimal("3.05"), delta=-0.31),
+        25: OptionSnapshot(con_id=25, bid=Decimal("1.90"), ask=Decimal("2.00"), delta=-0.24),
+        18: OptionSnapshot(con_id=18, bid=Decimal("0.55"), ask=Decimal("0.65"), delta=-0.16),
+        15: OptionSnapshot(con_id=15, bid=Decimal("0.25"), ask=Decimal("0.35"), delta=-0.09),
+    }
+    short_opt, long_opt = _select_spread_pair(
+        puts,
+        puts,
+        snaps,
+        is_put=True,
+        target_delta=0.30,
+        max_delta=0.35,
+        min_ratio=0.25,
+        fallback_delta=0.06,
+        max_max_loss=400.0,
+    )
+    assert short_opt is not None and long_opt is not None
+    assert short_opt.strike == 95.0  # 0.31Δ short strike
+    assert long_opt.strike == 92.0  # $3 wide, $1.05 credit (35% ratio), $195 max_loss <= $400

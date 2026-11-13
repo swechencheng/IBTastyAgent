@@ -29,6 +29,8 @@ class _StrategyEnv(BaseSettings):
     target_dte: int | None = None
     max_short_leg_delta: float | None = None
     target_short_delta: float | None = None
+    spread_max_short_leg_delta: float | None = None
+    spread_target_short_delta: float | None = None
     spread_long_delta: float | None = None
     min_credit_width_ratio: float | None = None
     index_call_min_credit_width_ratio: float | None = None

@@ -3,7 +3,7 @@
 Each tick, for every OPEN position we mark it (cost-to-close + current short-leg delta),
 ask ``strategy/exits.py`` what to do, and act:
   - CLOSE -> place a closing order, book realized P/L
-  - ROLL  -> roll out (21 DTE) or roll the untested side; falls back to CLOSE if no
+  - ROLL  -> roll out (at manage_dte, default 14 DTE) or roll the untested side; falls back to CLOSE if no
              credit roll is available
 
 Pure/testable: the live mark and the close/roll broker actions are injected as
@@ -153,7 +153,7 @@ async def manage_exits(
                 )
                 continue
 
-            # No credit roll available -> fall through to a plain close (e.g. 21-DTE roll).
+            # No credit roll available -> fall through to a plain close (e.g. manage_dte roll).
             decision_reason = decision.reason + " (no credit roll; closed)"
         else:
             decision_reason = decision.reason

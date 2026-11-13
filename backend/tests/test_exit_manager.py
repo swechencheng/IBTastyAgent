@@ -98,11 +98,20 @@ async def test_take_profit_closes():
     assert closer.calls == [(t.id, 125.0)]
 
 
-async def test_roll_out_at_21_dte_records_new_trade():
+async def test_roll_out_at_14_dte_records_new_trade():
     lg = Ledger(in_memory_session())
+    t_hold = make_open_trade(
+        lg, exp_days=18, entry_days_ago=27, max_profit=250.0
+    )  # 18 DTE > 14 DTE manage threshold -> hold
+    out_hold = await manage_exits(
+        lg, PARAMS, mark_fn=mark(200.0), close_fn=FakeClose(), roll_fn=FakeRoll()
+    )
+    assert out_hold[0].action == "hold"
+    lg.close_trade(t_hold, exit_debit=0.0, exit_reason="cleanup")
+
     t = make_open_trade(
-        lg, exp_days=15, entry_days_ago=30, max_profit=250.0
-    )  # 15 DTE, ~20% profit
+        lg, exp_days=14, entry_days_ago=31, max_profit=250.0
+    )  # 14 DTE, ~20% profit
     closer, roller = FakeClose(), FakeRoll()
     out = await manage_exits(
         lg, PARAMS, mark_fn=mark(200.0), close_fn=closer, roll_fn=roller
@@ -133,7 +142,7 @@ async def test_roll_untested_when_tested():
 
 async def test_roll_falls_back_to_close_without_credit():
     lg = Ledger(in_memory_session())
-    t = make_open_trade(lg, exp_days=15, entry_days_ago=30)
+    t = make_open_trade(lg, exp_days=14, entry_days_ago=31)
     closer = FakeClose()
     out = await manage_exits(
         lg, PARAMS, mark_fn=mark(200.0), close_fn=closer, roll_fn=FakeRoll(result=None)
@@ -146,7 +155,7 @@ async def test_roll_falls_back_to_close_without_credit():
 
 async def test_roll_untested_without_credit_holds():
     lg = Ledger(in_memory_session())
-    t = make_open_trade(lg, exp_days=40, entry_days_ago=12)  # > 21 DTE, not DTE trigger
+    t = make_open_trade(lg, exp_days=40, entry_days_ago=12)  # > 14 DTE, not DTE trigger
     closer = FakeClose()
     out = await manage_exits(
         lg,

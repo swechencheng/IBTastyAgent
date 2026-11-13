@@ -41,17 +41,26 @@ def test_ahead_of_pace_closes():
     assert "ahead of pace" in d.reason
 
 
-def test_roll_out_at_21_dte():
+def test_roll_out_at_14_dte():
+    # At 18 or 21 DTE, holds under the new 14-DTE threshold
+    assert (
+        evaluate_exit(pos(cost=200.0, dte_remaining=21, days_held=24), P).action
+        is ExitAction.HOLD
+    )
+    assert (
+        evaluate_exit(pos(cost=200.0, dte_remaining=18, days_held=27), P).action
+        is ExitAction.HOLD
+    )
     d = evaluate_exit(
-        pos(cost=200.0, dte_remaining=21, days_held=30), P
-    )  # 20% profit, at DTE
+        pos(cost=200.0, dte_remaining=14, days_held=31), P
+    )  # 20% profit, at manage_dte=14
     assert d.action is ExitAction.ROLL
     assert d.roll_kind is RollKind.OUT
 
 
 def test_profit_takes_precedence_over_dte():
     d = evaluate_exit(
-        pos(cost=125.0, dte_remaining=21), P
+        pos(cost=125.0, dte_remaining=14), P
     )  # 50% AND at DTE -> take profit
     assert d.action is ExitAction.CLOSE
 

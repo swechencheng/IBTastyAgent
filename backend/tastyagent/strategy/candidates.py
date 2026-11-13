@@ -27,12 +27,21 @@ from ..ibkr.marketdata import (
 )
 from ..ibkr.metrics import get_iv_metrics
 from ..models import Action, CandidateTrade, Leg, Liquidity, OptionType, Strategy
+from .guardrails import INDEX_OR_ETF_SYMBOLS
 
 logger = logging.getLogger(__name__)
 
-# Placeholders for open interest and daily volume
-_PLACEHOLDER_OI = 1000
-_PLACEHOLDER_VOL = 500
+
+def _liquidity_from_snaps(*snaps: OptionSnapshot) -> Liquidity:
+    """Build Liquidity from actual option snapshots without faking OI/volume placeholders."""
+    width_pct = max((_width_pct(s) for s in snaps), default=1.0)
+    ois = [s.open_interest for s in snaps if getattr(s, "open_interest", None) is not None]
+    vols = [s.daily_volume for s in snaps if getattr(s, "daily_volume", None) is not None]
+    return Liquidity(
+        bid_ask_width_pct=width_pct,
+        open_interest=min(ois) if len(ois) == len(snaps) and ois else None,
+        daily_volume=min(vols) if len(vols) == len(snaps) and vols else None,
+    )
 
 
 def _parse_exp_date(exp: str | date) -> date:
@@ -121,11 +130,7 @@ def build_strangle_candidate(
             delta=call_snap.delta or 0.0,
         ),
     )
-    liquidity = Liquidity(
-        bid_ask_width_pct=max(_width_pct(put_snap), _width_pct(call_snap)),
-        open_interest=_PLACEHOLDER_OI,
-        daily_volume=_PLACEHOLDER_VOL,
-    )
+    liquidity = _liquidity_from_snaps(put_snap, call_snap)
     return CandidateTrade(
         symbol=symbol,
         strategy=Strategy.SHORT_STRANGLE,
@@ -180,7 +185,7 @@ def build_naked_put_candidate(
         buying_power_reduction=strike_bp,
         underlying_price=underlying_price,
         iv_rank=iv_rank,
-        liquidity=Liquidity(_width_pct(put_snap), _PLACEHOLDER_OI, _PLACEHOLDER_VOL),
+        liquidity=_liquidity_from_snaps(put_snap),
         earnings_in_days=earnings_in_days,
     )
 
@@ -235,7 +240,7 @@ def build_credit_spread_candidate(
         buying_power_reduction=max_loss,  # defined risk: BP == max loss
         underlying_price=underlying_price,
         iv_rank=iv_rank,
-        liquidity=Liquidity(_width_pct(short_snap), _PLACEHOLDER_OI, _PLACEHOLDER_VOL),
+        liquidity=_liquidity_from_snaps(short_snap, long_snap),
         earnings_in_days=earnings_in_days,
     )
 
@@ -311,9 +316,7 @@ def build_iron_condor_candidate(
         buying_power_reduction=max_loss,
         underlying_price=underlying_price,
         iv_rank=iv_rank,
-        liquidity=Liquidity(
-            max(_width_pct(ps), _width_pct(cs)), _PLACEHOLDER_OI, _PLACEHOLDER_VOL
-        ),
+        liquidity=_liquidity_from_snaps(ps, pl, cs, cl),
         earnings_in_days=earnings_in_days,
     )
 
@@ -327,11 +330,13 @@ def select_spread_long_option(
     min_ratio: float = 0.25,
     max_ratio: float = 0.35,
     fallback_delta: float = 0.07,
+    max_max_loss: float | None = None,
 ) -> Option | None:
     """Select the protective long wing for a credit spread.
 
     Follows Tom Sosnoff's rule: widen strikes to collect between 25% and 33% of the width
-    (or 20%-25% for index call credit spreads).
+    (or 20%-25% for index/ETF call credit spreads), while keeping max_loss <= max_max_loss
+    when a per-trade buying-power cap is provided.
     """
     short_snap = snaps.get(getattr(short_opt, "conId", 0))
     if not short_snap or short_snap.mid is None:
@@ -339,7 +344,7 @@ def select_spread_long_option(
     s_strike = _get_strike(short_opt)
     s_mid = float(short_snap.mid)
 
-    eligible = []
+    eligible: list[tuple[Option, float, float, float, float]] = []
     for opt in candidates:
         opt_snap = snaps.get(getattr(opt, "conId", 0))
         if not opt_snap or opt_snap.mid is None:
@@ -357,31 +362,124 @@ def select_spread_long_option(
             continue
         ratio = net_credit / width
         delta = abs(opt_snap.delta or 0.0)
-        eligible.append((opt, width, ratio, delta))
+        eligible.append((opt, width, ratio, delta, net_credit))
 
     if not eligible:
         return None
 
-    # 1. First priority: strikes collecting within target band [min_ratio, max_ratio]
-    in_band = [item for item in eligible if min_ratio <= item[2] <= max_ratio]
+    if max_max_loss is not None:
+        pool = [
+            item
+            for item in eligible
+            if (item[1] - item[4]) * 100.0 <= max_max_loss
+        ]
+        if not pool:
+            return None
+    else:
+        pool = eligible
+
+    # 1. First priority: strikes collecting within target band [min_ratio, max_ratio],
+    # preferring closeness to midpoint of band, then narrower width (lower BP).
+    in_band = [item for item in pool if min_ratio <= item[2] <= max_ratio]
     if in_band:
         target_ratio = (min_ratio + max_ratio) / 2.0
         return min(
             in_band,
-            key=lambda x: (abs(x[2] - target_ratio), abs(x[3] - fallback_delta)),
+            key=lambda x: (abs(x[2] - target_ratio), x[1], abs(x[3] - fallback_delta)),
         )[0]
 
     # 2. Second priority: any strike with ratio >= min_ratio
-    above_min = [item for item in eligible if item[2] >= min_ratio]
+    above_min = [item for item in pool if item[2] >= min_ratio]
     if above_min:
-        return min(above_min, key=lambda x: abs(x[2] - min_ratio))[0]
+        return min(above_min, key=lambda x: (abs(x[2] - min_ratio), x[1]))[0]
 
-    # 3. Fallback: closest to fallback delta
-    return min(eligible, key=lambda x: abs(x[3] - fallback_delta))[0]
+    # 3. Fallback: best available credit/width ratio within budget
+    return max(pool, key=lambda x: (x[2], -x[1], -abs(x[3] - fallback_delta)))[0]
+
+
+def _select_spread_pair(
+    short_pool: list[Option],
+    all_options: list[Option],
+    snaps: dict[int, OptionSnapshot],
+    *,
+    is_put: bool,
+    target_delta: float,
+    max_delta: float,
+    min_ratio: float,
+    fallback_delta: float,
+    max_max_loss: float | None = None,
+    max_short_attempts: int = 6,
+) -> tuple[Option | None, Option | None]:
+    """Choose (short, long) strikes for a defined-risk credit spread.
+
+    Tries up to `max_short_attempts` short legs closest to `target_delta` within
+    `max_delta`, returning the first pair that hits `min_ratio` within `max_max_loss`.
+    """
+    eligible_shorts = [
+        opt
+        for opt in short_pool
+        if (s := snaps.get(getattr(opt, "conId", 0)))
+        and s.delta is not None
+        and s.mid is not None
+        and abs(s.delta) <= max_delta
+    ]
+    if not eligible_shorts:
+        best_s = select_by_delta(short_pool, snaps, target_delta)
+        if not best_s:
+            return None, None
+        best_l = select_spread_long_option(
+            best_s,
+            all_options,
+            snaps,
+            is_put=is_put,
+            min_ratio=min_ratio,
+            fallback_delta=fallback_delta,
+            max_max_loss=max_max_loss,
+        )
+        return best_s, best_l
+
+    ranked_shorts = sorted(
+        eligible_shorts,
+        key=lambda o: abs(abs(snaps[getattr(o, "conId", 0)].delta or 0.0) - target_delta),
+    )
+
+    best_fallback: tuple[Option, Option, float] | None = None
+    for s_opt in ranked_shorts[:max_short_attempts]:
+        l_opt = select_spread_long_option(
+            s_opt,
+            all_options,
+            snaps,
+            is_put=is_put,
+            min_ratio=min_ratio,
+            fallback_delta=fallback_delta,
+            max_max_loss=max_max_loss,
+        )
+        if not l_opt:
+            continue
+        s_mid = float(snaps[getattr(s_opt, "conId", 0)].mid or 0.0)
+        l_mid = float(snaps[getattr(l_opt, "conId", 0)].mid or 0.0)
+        width = abs(_get_strike(s_opt) - _get_strike(l_opt))
+        if width <= 0 or s_mid <= l_mid:
+            continue
+        ratio = (s_mid - l_mid) / width
+        if ratio >= min_ratio:
+            return s_opt, l_opt
+        if best_fallback is None or ratio > best_fallback[2]:
+            best_fallback = (s_opt, l_opt, ratio)
+
+    if best_fallback is not None:
+        return best_fallback[0], best_fallback[1]
+    return None, None
 
 
 async def _candidates_for_symbol(
-    client: IBKRClient, params: StrategyParams, today: date, symbol: str, m
+    client: IBKRClient,
+    params: StrategyParams,
+    today: date,
+    symbol: str,
+    m,
+    *,
+    max_trade_bp: float | None = None,
 ) -> list[CandidateTrade]:
     """Build feasible options strategies for one underlying using IBKR chain and Greeks."""
     ib_session = (
@@ -451,7 +549,7 @@ async def _candidates_for_symbol(
         else None
     )
 
-    # Short legs must respect max_short_leg_delta cap
+    # Undefined-risk short legs obey target_short_delta & max_short_leg_delta (~0.18Δ / 0.25Δ)
     eligible_short_puts = [
         p
         for p in puts
@@ -470,36 +568,39 @@ async def _candidates_for_symbol(
     p_short = select_by_delta(eligible_short_puts, snaps, params.target_short_delta)
     c_short = select_by_delta(eligible_short_calls, snaps, params.target_short_delta)
 
-    is_index = symbol.upper() in {"SPX", "SPY", "QQQ", "IWM", "DIA"}
+    is_index = symbol.upper() in INDEX_OR_ETF_SYMBOLS
     min_put_ratio = params.min_credit_width_ratio
     min_call_ratio = (
         getattr(params, "index_call_min_credit_width_ratio", 0.20)
         if is_index
         else params.min_credit_width_ratio
     )
-    p_long = (
-        select_spread_long_option(
-            p_short,
-            puts,
-            snaps,
-            is_put=True,
-            min_ratio=min_put_ratio,
-            fallback_delta=params.spread_long_delta,
-        )
-        if p_short
-        else None
+
+    # Defined-risk spreads sell closer to spread_target_short_delta (~0.30Δ) and
+    # keep wing max_loss within max_trade_bp so 25%-33% credit/width is achievable.
+    spread_target = getattr(params, "spread_target_short_delta", 0.30)
+    spread_cap = getattr(params, "spread_max_short_leg_delta", 0.35)
+    p_short_sp, p_long = _select_spread_pair(
+        puts,
+        puts,
+        snaps,
+        is_put=True,
+        target_delta=spread_target,
+        max_delta=spread_cap,
+        min_ratio=min_put_ratio,
+        fallback_delta=params.spread_long_delta,
+        max_max_loss=max_trade_bp,
     )
-    c_long = (
-        select_spread_long_option(
-            c_short,
-            calls,
-            snaps,
-            is_put=False,
-            min_ratio=min_call_ratio,
-            fallback_delta=params.spread_long_delta,
-        )
-        if c_short
-        else None
+    c_short_sp, c_long = _select_spread_pair(
+        calls,
+        calls,
+        snaps,
+        is_put=False,
+        target_delta=spread_target,
+        max_delta=spread_cap,
+        min_ratio=min_call_ratio,
+        fallback_delta=params.spread_long_delta,
+        max_max_loss=max_trade_bp,
     )
 
     def sn(o):
@@ -534,11 +635,11 @@ async def _candidates_for_symbol(
             )
         )
     if (
-        p_short
+        p_short_sp
         and p_long
-        and sn(p_short)
+        and sn(p_short_sp)
         and sn(p_long)
-        and _get_strike(p_long) < _get_strike(p_short)
+        and _get_strike(p_long) < _get_strike(p_short_sp)
     ):
         out.append(
             build_credit_spread_candidate(
@@ -546,9 +647,9 @@ async def _candidates_for_symbol(
                 underlying,
                 ivr,
                 dte,
-                p_short,
+                p_short_sp,
                 p_long,
-                sn(p_short),
+                sn(p_short_sp),
                 sn(p_long),
                 option_type=OptionType.PUT,
                 strategy=Strategy.PUT_CREDIT_SPREAD,
@@ -556,11 +657,11 @@ async def _candidates_for_symbol(
             )
         )
     if (
-        c_short
+        c_short_sp
         and c_long
-        and sn(c_short)
+        and sn(c_short_sp)
         and sn(c_long)
-        and _get_strike(c_long) > _get_strike(c_short)
+        and _get_strike(c_long) > _get_strike(c_short_sp)
     ):
         out.append(
             build_credit_spread_candidate(
@@ -568,9 +669,9 @@ async def _candidates_for_symbol(
                 underlying,
                 ivr,
                 dte,
-                c_short,
+                c_short_sp,
                 c_long,
-                sn(c_short),
+                sn(c_short_sp),
                 sn(c_long),
                 option_type=OptionType.CALL,
                 strategy=Strategy.CALL_CREDIT_SPREAD,
@@ -578,12 +679,14 @@ async def _candidates_for_symbol(
             )
         )
     if (
-        p_short
-        and c_short
+        p_short_sp
+        and c_short_sp
         and p_long
         and c_long
-        and _get_strike(p_long) < _get_strike(p_short)
-        and _get_strike(c_long) > _get_strike(c_short)
+        and _get_strike(p_long)
+        < _get_strike(p_short_sp)
+        < _get_strike(c_short_sp)
+        < _get_strike(c_long)
     ):
         out.append(
             build_iron_condor_candidate(
@@ -591,9 +694,9 @@ async def _candidates_for_symbol(
                 underlying,
                 ivr,
                 dte,
-                p_short,
+                p_short_sp,
                 p_long,
-                c_short,
+                c_short_sp,
                 c_long,
                 snaps,
                 earnings_in_days=earn,
@@ -611,6 +714,7 @@ async def generate_candidates(
     *,
     concurrency: int = 5,
     metrics: dict | None = None,
+    max_trade_bp: float | None = None,
 ) -> list[CandidateTrade]:
     """Scan watchlist: build feasible strategies concurrently via IBKR."""
     today = date.today()
@@ -633,7 +737,9 @@ async def generate_candidates(
         async with sem:
             try:
                 m = metrics.get(symbol) if metrics else None
-                return await _candidates_for_symbol(client, params, today, symbol, m)
+                return await _candidates_for_symbol(
+                    client, params, today, symbol, m, max_trade_bp=max_trade_bp
+                )
             except Exception as e:
                 logger.debug("Failed candidate generation for %s: %s", symbol, e)
                 return []

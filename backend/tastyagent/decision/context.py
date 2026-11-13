@@ -21,11 +21,20 @@ DEFAULT_WATCHLIST = [
     "XLE",
     "XLF",
     "XLK",
+    "XLV",
+    "SMH",
+    "SOXX",
+    "IGV",
     "GLD",
-    "TLT",  # sectors / commodities / bonds
+    "SLV",
+    "TLT",
+    "HYG",
+    "EEM",  # sectors / commodities / bonds / EM
     "AAPL",
     "AMD",
-    "TSLA",  # liquid single names
+    "TSLA",
+    "UBER",
+    "INTC",  # liquid single names
 ]
 
 

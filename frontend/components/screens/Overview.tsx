@@ -198,6 +198,10 @@ export default function Overview({ goTo }: { goTo: (r: string) => void }) {
                 <TableBody>
                   {pos.slice(0, 5).map((t) => {
                     const dte = getDte(t);
+                    const manageDte =
+                      typeof settings.data?.strategy?.manage_dte === "number"
+                        ? settings.data.strategy.manage_dte
+                        : 14;
                     return (
                     <TableRow key={t.id}>
                       <TableCell className="font-semibold">{t.symbol}</TableCell>
@@ -205,7 +209,7 @@ export default function Overview({ goTo }: { goTo: (r: string) => void }) {
                       <TableCell className={cn("text-right", num)}>{pop(t.probability_of_profit)}</TableCell>
                       <TableCell className={cn("text-right", num, signClass(t.unrealized_pnl))}>{fmtMoneySigned(t.unrealized_pnl)}</TableCell>
                       <TableCell
-                        className={cn("text-right", num, dte <= 21 && "text-warn")}
+                        className={cn("text-right", num, dte <= manageDte && "text-warn")}
                         title={`Current DTE: ${dte} (Opened at: ${t.dte_at_entry} DTE)`}
                       >
                         {dte}

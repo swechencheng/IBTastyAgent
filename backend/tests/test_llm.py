@@ -70,3 +70,26 @@ async def test_select_trades_with_mocked_client():
     assert decision.commentary == "Solid regime."
     assert "SPY-short_strangle-0" in id_map
     assert "XLE-short_strangle-1" in id_map
+
+
+def test_build_user_message_omits_none_liquidity_fields():
+    import json
+    from tastyagent.decision.llm import build_user_message
+    from tastyagent.models import Liquidity
+
+    c_none = make_candidate(
+        symbol="SPY",
+        liquidity=Liquidity(bid_ask_width_pct=0.04, open_interest=None, daily_volume=None),
+    )
+    c_with = make_candidate(
+        symbol="QQQ",
+        liquidity=Liquidity(bid_ask_width_pct=0.03, open_interest=1200, daily_volume=450),
+    )
+    text, _ = build_user_message([c_none, c_with], {"net_liq": 15000.0}, {})
+    # Split out candidate JSON array
+    cand_json = text.split("CANDIDATES (")[1].split("\n\nSelect which")[0].split(":\n", 1)[1]
+    parsed = json.loads(cand_json)
+    assert "open_interest" not in parsed[0]["liquidity"]
+    assert "daily_volume" not in parsed[0]["liquidity"]
+    assert parsed[1]["liquidity"]["open_interest"] == 1200
+    assert parsed[1]["liquidity"]["daily_volume"] == 450

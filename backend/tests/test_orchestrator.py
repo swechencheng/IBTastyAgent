@@ -175,3 +175,48 @@ async def test_sandbox_mode_allows_low_cushion():
         selector=selector_picking([(0, 1)]),
     )
     assert len(res.planned) == 1
+
+
+async def test_infeasible_candidates_filtered_before_llm_and_summary_enriched():
+    good = make_candidate(symbol="SPY", buying_power_reduction=2000.0)
+    oversized = make_candidate(symbol="QQQ", buying_power_reduction=9000.0)
+    cooldown = make_candidate(symbol="XLE", buying_power_reduction=1500.0)
+
+    seen_symbols = []
+    seen_portfolio = {}
+
+    async def recording_selector(candidates, port_summary, regime):
+        seen_symbols.extend(c.symbol for c in candidates)
+        seen_portfolio.update(port_summary)
+        id_map = {candidate_id(c, i): c for i, c in enumerate(candidates)}
+        ids = list(id_map)
+        return (
+            LLMDecision(
+                selections=[
+                    LLMTradeSelection(
+                        candidate_id=ids[0], contracts=1, rationale="feasible"
+                    )
+                ],
+                commentary="picked only feasible",
+            ),
+            id_map,
+        )
+
+    res = await run_cycle(
+        [good, oversized, cooldown],
+        portfolio(losing_symbols={"XLE"}, bp_used=5000.0),
+        {},
+        PARAMS,
+        LIMITS,
+        selector=recording_selector,
+    )
+    assert seen_symbols == ["SPY"]
+    assert res.considered == 1
+    assert [p.candidate.symbol for p in res.planned] == ["SPY"]
+    assert any("sizing" in reason for _, reason in res.rejected)
+    assert any("risk" in reason for _, reason in res.rejected)
+    assert seen_portfolio["max_trade_bp"] == 5000.0
+    assert seen_portfolio["total_bp_remaining"] == 35_000.0
+    assert "spread_bp_remaining" in seen_portfolio
+    assert "undefined_bp_remaining" in seen_portfolio
+    assert seen_portfolio["losing_symbols_cooldown"] == ["XLE"]

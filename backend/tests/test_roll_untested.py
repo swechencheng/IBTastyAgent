@@ -254,6 +254,10 @@ async def test_build_roll_candidate_untested_put_tested(mock_client):
 
 @pytest.mark.asyncio
 async def test_roll_out_preserves_put_credit_spread(mock_client):
+    from datetime import timedelta
+
+    exp_dt = date.today() + timedelta(days=45)
+    exp_str = exp_dt.strftime("%Y%m%d")
     trade = Trade(
         id=280,
         symbol="SPY",
@@ -264,14 +268,14 @@ async def test_roll_out_preserves_put_credit_spread(mock_client):
             TradeLeg(
                 option_type="put",
                 strike=500.0,
-                expiration=date(2026, 10, 16),
+                expiration=date.today() + timedelta(days=10),
                 action="sell_to_open",
                 delta=-0.24,
             ),
             TradeLeg(
                 option_type="put",
                 strike=490.0,
-                expiration=date(2026, 10, 16),
+                expiration=date.today() + timedelta(days=10),
                 action="buy_to_open",
                 delta=-0.07,
             ),
@@ -282,12 +286,12 @@ async def test_roll_out_preserves_put_credit_spread(mock_client):
         min_dte=20, max_dte=60, target_dte=45, prefer_monthly_expirations=False
     )
 
-    raw_exps = ["20261120"]
+    raw_exps = [exp_str]
     strikes = [480.0, 490.0, 500.0, 510.0, 520.0]
     contracts = [
         Option(
             "SPY",
-            "20261120",
+            exp_str,
             s,
             r,
             "SMART",
@@ -342,3 +346,99 @@ async def test_roll_out_preserves_put_credit_spread(mock_client):
     long_put = [l for l in cand.legs if l.action.value == "buy_to_open"][0]
     assert short_put.strike == 500.0
     assert long_put.strike == 490.0
+
+
+@pytest.mark.asyncio
+async def test_roll_out_same_strike_fallback_when_underwater(mock_client):
+    from datetime import timedelta
+    from tastyagent.strategy.guardrails import validate_roll_candidate
+
+    exp_dt = date.today() + timedelta(days=45)
+    exp_str = exp_dt.strftime("%Y%m%d")
+    trade = Trade(
+        id=281,
+        symbol="XLE",
+        strategy="put_credit_spread",
+        contracts=1,
+        status=TradeStatus.OPEN,
+        legs=[
+            TradeLeg(
+                option_type="put",
+                strike=50.0,
+                expiration=date.today() + timedelta(days=12),
+                action="sell_to_open",
+                delta=-0.62,
+            ),
+            TradeLeg(
+                option_type="put",
+                strike=45.0,
+                expiration=date.today() + timedelta(days=12),
+                action="buy_to_open",
+                delta=-0.35,
+            ),
+        ],
+    )
+    # Underwater spread: costs $300 to close; fresh ~0.30Δ spread (44/39) only pays $140
+    # while preserving 50/45 strikes in the next cycle pays $340 credit with non-expanding risk
+    mark = PositionMark(cost_to_close=300.0, max_short_delta=0.62, tested_side=OptionType.PUT)
+    params = StrategyParams(
+        min_dte=20, max_dte=60, target_dte=45, prefer_monthly_expirations=False
+    )
+
+    strikes = [39.0, 44.0, 45.0, 50.0]
+    contracts = [
+        Option("XLE", exp_str, s, r, "SMART", conId=int(s * 10 + (1 if r == "C" else 2)))
+        for s in strikes
+        for r in ("P", "C")
+    ]
+    price_map = {
+        (50.0, "P"): (5.20, -0.60),
+        (45.0, "P"): (1.80, -0.35),
+        (44.0, "P"): (1.70, -0.30),
+        (39.0, "P"): (0.30, -0.09),
+    }
+    snaps = {}
+    for c in contracts:
+        mid, delta = price_map.get((c.strike, c.right), (0.10, 0.05))
+        snaps[c.conId] = OptionSnapshot(
+            con_id=c.conId,
+            bid=Decimal(str(round(mid - 0.05, 2))),
+            ask=Decimal(str(round(mid + 0.05, 2))),
+            delta=delta,
+        )
+
+    cds = [MagicMock(contract=c) for c in contracts]
+    mock_client.data_ib.reqContractDetailsAsync = AsyncMock(return_value=cds)
+
+    with (
+        patch(
+            "tastyagent.runner.get_option_chain_parameters",
+            AsyncMock(return_value=([exp_str], strikes)),
+        ),
+        patch("tastyagent.runner.get_underlying_price", AsyncMock(return_value=48.0)),
+        patch("tastyagent.runner.snapshot_options", AsyncMock(return_value=snaps)),
+        patch(
+            "tastyagent.runner.get_iv_metrics",
+            AsyncMock(return_value=MagicMock(iv_rank=0.15)),
+        ),
+    ):
+        cand = await _build_roll_candidate(
+            mock_client, trade, RollKind.OUT, mark, params
+        )
+
+    assert cand is not None
+    assert cand.net_credit >= mark.cost_to_close
+    assert cand.strike_width == 5.0
+    short_put = [l for l in cand.legs if l.action.value == "sell_to_open"][0]
+    long_put = [l for l in cand.legs if l.action.value == "buy_to_open"][0]
+    assert short_put.strike == 50.0
+    assert long_put.strike == 45.0
+    assert validate_roll_candidate(
+        cand,
+        roll_kind="out",
+        exit_debit_total=mark.cost_to_close,
+        contracts=1,
+        original_dte_remaining=12,
+        original_strike_width=5.0,
+        params=params,
+    ).ok

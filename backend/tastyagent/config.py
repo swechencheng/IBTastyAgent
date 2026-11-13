@@ -44,10 +44,12 @@ class StrategyParams:
     min_dte: int = 30
     max_dte: int = 55
     target_dte: int = 45
-    max_short_leg_delta: float = 0.25  # abs delta cap on any short leg (~16-25 delta)
-    target_short_delta: float = 0.24  # delta we aim for when choosing short strikes
+    max_short_leg_delta: float = 0.25  # abs delta cap on undefined-risk short leg (~16-25 delta)
+    target_short_delta: float = 0.18  # target delta for undefined-risk short strikes (~16-20 delta)
+    spread_max_short_leg_delta: float = 0.35  # abs delta cap on defined-risk spread/condor short legs
+    spread_target_short_delta: float = 0.30  # ~30-delta target on defined-risk spreads for 25%-33% credit/width
     spread_long_delta: float = (
-        0.07  # delta for protective long wings (spreads / condors)
+        0.07  # fallback delta for protective long wings (spreads / condors)
     )
     # Defined-risk spread / condor rule: min credit collected as ratio of strike width (Tastytrade 25%-33% rule)
     min_credit_width_ratio: float = 0.25
@@ -59,11 +61,11 @@ class StrategyParams:
     min_open_interest: int = 500
     min_daily_volume: int = 100
     earnings_blackout_days: int = 7  # avoid opening within N days of earnings
-    universe_top_n: int = 15  # only do chain/greeks work on the top-N highest-IVR names
+    universe_top_n: int = 25  # scan top-N highest-IVR names so affordable ETFs are not starved
 
     # --- Exit / management ---
     take_profit_pct: float = 0.50  # manage winners at 50% of max profit
-    manage_dte: int = 21  # roll out at 21 DTE
+    manage_dte: int = 14  # roll out / manage at 14 DTE (gives recovery room vs 21 DTE)
     tested_delta_threshold: float = 0.45  # short-leg |delta| that counts as "tested"
     use_hard_stop: bool = (
         False  # tastytrade leans on management, not stops; off by default
@@ -84,9 +86,19 @@ class StrategyParams:
                 f"target_short_delta ({self.target_short_delta}) cannot exceed "
                 f"max_short_leg_delta ({self.max_short_leg_delta})"
             )
+        if self.spread_target_short_delta > self.spread_max_short_leg_delta:
+            raise ValueError(
+                f"spread_target_short_delta ({self.spread_target_short_delta}) cannot exceed "
+                f"spread_max_short_leg_delta ({self.spread_max_short_leg_delta})"
+            )
         if self.max_short_leg_delta >= self.tested_delta_threshold:
             raise ValueError(
                 f"max_short_leg_delta ({self.max_short_leg_delta}) must be strictly "
+                f"less than tested_delta_threshold ({self.tested_delta_threshold})"
+            )
+        if self.spread_max_short_leg_delta >= self.tested_delta_threshold:
+            raise ValueError(
+                f"spread_max_short_leg_delta ({self.spread_max_short_leg_delta}) must be strictly "
                 f"less than tested_delta_threshold ({self.tested_delta_threshold})"
             )
 

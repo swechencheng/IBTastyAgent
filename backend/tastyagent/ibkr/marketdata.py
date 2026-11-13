@@ -10,6 +10,7 @@ import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
 import logging
+import math
 from typing import Dict, List, Optional, Tuple
 
 from ib_async import IB, Option, Stock
@@ -30,6 +31,8 @@ class OptionSnapshot:
     delta: Optional[float] = None
     implied_vol: Optional[float] = None
     model_price: Optional[float] = None
+    open_interest: Optional[int] = None
+    daily_volume: Optional[int] = None
 
     def __post_init__(self):
         if not self.streamer_symbol:
@@ -145,9 +148,15 @@ async def snapshot_options(
     }
 
     tickers = [
-        ib.reqMktData(c, genericTickList="106", snapshot=False) for c in contracts
+        ib.reqMktData(c, genericTickList="100,101,106", snapshot=False)
+        for c in contracts
     ]
     end_time = asyncio.get_event_loop().time() + timeout
+
+    def _valid_count(val) -> Optional[int]:
+        if isinstance(val, (int, float)) and math.isfinite(val) and val >= 0:
+            return int(val)
+        return None
 
     try:
         while asyncio.get_event_loop().time() < end_time:
@@ -159,6 +168,21 @@ async def snapshot_options(
                     snap.bid = Decimal(str(t.bid))
                 if t.ask is not None and t.ask > 0:
                     snap.ask = Decimal(str(t.ask))
+
+                vol = _valid_count(getattr(t, "volume", None))
+                if vol is not None and vol > 0:
+                    snap.daily_volume = vol
+
+                oi_raw = (
+                    getattr(t, "putOpenInterest", None)
+                    if c.right == "P"
+                    else getattr(t, "callOpenInterest", None)
+                )
+                oi = _valid_count(oi_raw)
+                if oi is None:
+                    oi = _valid_count(getattr(t, "openInterest", None))
+                if oi is not None and oi > 0:
+                    snap.open_interest = oi
 
                 # Check Greeks (model, bid, or ask)
                 greeks = t.modelGreeks or t.bidGreeks or t.askGreeks

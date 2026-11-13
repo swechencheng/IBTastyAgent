@@ -72,8 +72,8 @@ class Leg:
 @dataclass(frozen=True)
 class Liquidity:
     bid_ask_width_pct: float  # (ask - bid) / mid
-    open_interest: int
-    daily_volume: int
+    open_interest: int | None = None
+    daily_volume: int | None = None
 
 
 @dataclass(frozen=True)

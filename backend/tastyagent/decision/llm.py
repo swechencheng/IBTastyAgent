@@ -41,7 +41,8 @@ tastytrade mechanics you operate by:
 - Sell premium when implied volatility is elevated. Prefer higher IV rank (IVR) \
 underlyings — richer premium, stronger mean-reversion edge. Between two otherwise \
 similar candidates, prefer the higher IVR.
-- Trade liquid underlyings: tight bid/ask, high open interest and volume. Prefer \
+- Trade liquid underlyings: tight bid/ask (use `bid_ask_width_pct` as the primary \
+liquidity signal, and `open_interest` / `daily_volume` when reported). Prefer \
 better liquidity; it lowers slippage on entry and management.
 - Stay small and diversified. Avoid concentrating buying power in one underlying or \
 one sector. Spread risk across uncorrelated names. Keep plenty of dry powder — do \
@@ -50,16 +51,21 @@ few large ones. In live trading, account margin cushion must stay safely above 3
 (cushion < 30% halts all new entries).
 - Defined-risk structures (spreads, iron condors) are preferable when buying power \
 or account size is constrained; undefined-risk (strangles, naked puts/calls) demand \
-ample buying power and high liquidity. On defined-risk spreads, enforce the 1/3 Strike Width \
-rule: collected credit must be at least 1/3 of the spread width (e.g. $1.67+ on a $5 spread).
+ample buying power and high liquidity. Candidates have already been pre-filtered for \
+sufficient credit/width (typically 25%-33%+ of width, or 20%+ on index/ETF call spreads); \
+between similar spreads, prefer higher `credit_width_ratio` and tighter bid/ask.
 - Mechanical management (handled elsewhere by the agent) takes profits around 50% of \
-max credit (or 1/3 spread width, whichever is smaller) and defends near 21 DTE, so favor \
-entries with enough premium and time for that to play out.
+max credit (or 1/3 spread width, whichever is smaller) and defends or rolls near 14 DTE, \
+so favor entries with enough premium and time for that to play out.
 - "Number of occurrences" beats conviction on any single trade. When unsure, prefer \
 spreading smaller positions across more candidates over a large single bet.
 
 Selection rules:
-- Choose ONLY from the provided candidates. Never invent a trade, strike, or symbol.
+- Choose ONLY from the provided candidates. Every candidate shown has already passed \
+entry guardrails, per-trade BP sizing (`max_trade_bp`), and single-trade risk checks; \
+check remaining portfolio budget (`total_bp_remaining`, `spread_bp_remaining`, \
+`undefined_bp_remaining`, `open_position_slots_remaining`) when selecting multiple picks. \
+Never invent a trade, strike, or symbol.
 - You may select zero candidates if none are compelling or the portfolio is already \
 heavily deployed — returning an empty selection is a valid, often correct answer.
 - For each selected candidate, set `contracts` to a quantity consistent with staying \
@@ -135,8 +141,16 @@ def _candidate_payload(candidate: CandidateTrade, cid: str) -> dict:
         "probability_of_profit": round(candidate.probability_of_profit, 3),
         "liquidity": {
             "bid_ask_width_pct": round(candidate.liquidity.bid_ask_width_pct, 4),
-            "open_interest": candidate.liquidity.open_interest,
-            "daily_volume": candidate.liquidity.daily_volume,
+            **(
+                {"open_interest": candidate.liquidity.open_interest}
+                if candidate.liquidity.open_interest is not None
+                else {}
+            ),
+            **(
+                {"daily_volume": candidate.liquidity.daily_volume}
+                if candidate.liquidity.daily_volume is not None
+                else {}
+            ),
         },
         "earnings_in_days": candidate.earnings_in_days,
     }
@@ -161,7 +175,7 @@ def build_user_message(
         + json.dumps(portfolio, indent=2, sort_keys=True)
         + "\n\nMARKET REGIME:\n"
         + json.dumps(regime, indent=2, sort_keys=True)
-        + "\n\nCANDIDATES (all have passed hard guardrails):\n"
+        + "\n\nCANDIDATES (all have passed guardrails, initial sizing, and single-trade risk checks):\n"
         + json.dumps(payload, indent=2, sort_keys=True)
         + "\n\nSelect which candidates to open now, size each, and explain in JSON format."
     )

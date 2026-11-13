@@ -7,6 +7,7 @@ import { toast } from "sonner";
 
 import {
   fetcher,
+  Settings,
   Trade,
   fmtMoney0,
   fmtMoneySigned,
@@ -46,6 +47,11 @@ export default function Positions() {
 
   const open = useSWR<Trade[]>("/api/positions", fetcher, POLL);
   const closed = useSWR<Trade[]>("/api/trades/closed", fetcher, POLL);
+  const settings = useSWR<Settings>("/api/settings", fetcher, POLL);
+  const manageDte =
+    typeof settings.data?.strategy?.manage_dte === "number"
+      ? settings.data.strategy.manage_dte
+      : 14;
 
   const openList = open.data || [];
   const closedList = closed.data || [];
@@ -142,7 +148,7 @@ export default function Positions() {
                             {fmtSignedDelta(t.net_delta)}
                           </TableCell>
                           <TableCell
-                            className={cn("text-right", num, dte <= 21 && "text-warn")}
+                            className={cn("text-right", num, dte <= manageDte && "text-warn")}
                             title={`Current DTE: ${dte} (Opened at: ${t.dte_at_entry} DTE)`}
                           >
                             {dte}

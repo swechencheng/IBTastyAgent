@@ -44,6 +44,8 @@ type Form = {
   dteMax: number;
   shortDelta: number;
   maxShortDelta: number;
+  spreadShortDelta: number;
+  spreadMaxShortDelta: number;
   spreadLongDelta: number;
   minCreditWidthRatio: number;
   testedDelta: number;
@@ -62,6 +64,7 @@ type Form = {
   // --- Risk limits ---
   bpPerTrade: number;
   bpTotal: number;
+  bpSpreadCap: number;
   maxPos: number;
   maxPerSym: number;
   dailyHalt: number;
@@ -121,24 +124,27 @@ function fromSettings(sData: SettingsT): Form {
     dteMin: n(st.min_dte, 30),
     dteTarget: n(st.target_dte, 45),
     dteMax: n(st.max_dte, 55),
-    shortDelta: Math.round(n(st.target_short_delta, 0.24) * 100),
+    shortDelta: Math.round(n(st.target_short_delta, 0.18) * 100),
     maxShortDelta: Math.round(n(st.max_short_leg_delta, 0.25) * 100),
+    spreadShortDelta: Math.round(n(st.spread_target_short_delta, 0.30) * 100),
+    spreadMaxShortDelta: Math.round(n(st.spread_max_short_leg_delta, 0.35) * 100),
     spreadLongDelta: Math.round(n(st.spread_long_delta, 0.05) * 100),
     minCreditWidthRatio: Number((n(st.min_credit_width_ratio, 0.25) * 100).toFixed(1)),
     testedDelta: Math.round(n(st.tested_delta_threshold, 0.45) * 100),
-    topN: n(st.universe_top_n, 15),
+    topN: n(st.universe_top_n, 25),
     maxBidAskWidthPct: Math.round(n(st.max_bid_ask_width_pct, 0.10) * 100),
     minOpenInterest: n(st.min_open_interest, 500),
     minDailyVolume: n(st.min_daily_volume, 100),
     earningsBlackoutDays: n(st.earnings_blackout_days, 7),
 
     takeProfit: Math.round(n(st.take_profit_pct, 0.5) * 100),
-    manageDte: n(st.manage_dte, 21),
+    manageDte: n(st.manage_dte, 14),
     hardStop: !!st.use_hard_stop,
     stopMult: n(st.stop_loss_multiple, 2),
 
     bpPerTrade: Math.round(n(rk.max_trade_bp_pct, 0.05) * 100),
     bpTotal: Math.round(n(rk.max_total_bp_pct, 0.4) * 100),
+    bpSpreadCap: Math.round(n(rk.max_spread_bp_pct, 0.2) * 100),
     maxPos: n(rk.max_positions, 15),
     maxPerSym: n(rk.max_positions_per_symbol, 2),
     dailyHalt: Math.round(n(rk.max_daily_loss_pct, 0.03) * 100),
@@ -187,6 +193,8 @@ function toPayload(f: Form): SettingsUpdate {
       max_dte: f.dteMax,
       target_short_delta: f.shortDelta / 100,
       max_short_leg_delta: f.maxShortDelta / 100,
+      spread_target_short_delta: f.spreadShortDelta / 100,
+      spread_max_short_leg_delta: f.spreadMaxShortDelta / 100,
       spread_long_delta: f.spreadLongDelta / 100,
       min_credit_width_ratio: f.minCreditWidthRatio / 100,
       tested_delta_threshold: f.testedDelta / 100,
@@ -203,6 +211,7 @@ function toPayload(f: Form): SettingsUpdate {
     risk: {
       max_trade_bp_pct: f.bpPerTrade / 100,
       max_total_bp_pct: f.bpTotal / 100,
+      max_spread_bp_pct: f.bpSpreadCap / 100,
       max_positions: f.maxPos,
       max_positions_per_symbol: f.maxPerSym,
       max_daily_loss_pct: f.dailyHalt / 100,
@@ -610,8 +619,8 @@ export default function Settings({
                 </span>
               </Field>
               <Field
-                label="Target short delta"
-                help="Target strike selection delta for short legs (e.g. 24Δ ≈ 52% OTM / ~70% PoP)."
+                label="Target short delta (undefined-risk)"
+                help="Target short strike delta for strangles and naked puts (default: 18Δ)."
                 unit="Δ"
                 derived={
                   form.shortDelta > form.maxShortDelta
@@ -622,8 +631,8 @@ export default function Settings({
                 <NInput value={form.shortDelta} onChange={(v) => set("shortDelta", v)} />
               </Field>
               <Field
-                label="Max short leg delta"
-                help="Hard cap on any short leg at entry. Target short delta must not exceed this."
+                label="Max short leg delta (undefined-risk)"
+                help="Hard cap on undefined-risk short legs at entry. Target short delta must not exceed this (default: 25Δ)."
                 unit="Δ"
                 derived={
                   form.maxShortDelta >= form.testedDelta
@@ -632,6 +641,30 @@ export default function Settings({
                 }
               >
                 <NInput value={form.maxShortDelta} onChange={(v) => set("maxShortDelta", v)} />
+              </Field>
+              <Field
+                label="Spread target short delta"
+                help="Target short strike delta for defined-risk credit spreads & iron condors (default: 30Δ)."
+                unit="Δ"
+                derived={
+                  form.spreadShortDelta > form.spreadMaxShortDelta
+                    ? `⚠️ Guard violation: Spread target delta (${form.spreadShortDelta}Δ) cannot exceed Spread max delta cap (${form.spreadMaxShortDelta}Δ)`
+                    : undefined
+                }
+              >
+                <NInput value={form.spreadShortDelta} onChange={(v) => set("spreadShortDelta", v)} />
+              </Field>
+              <Field
+                label="Spread max short leg delta"
+                help="Hard cap on defined-risk spread/condor short legs at entry (default: 35Δ)."
+                unit="Δ"
+                derived={
+                  form.spreadMaxShortDelta >= form.testedDelta
+                    ? `⚠️ Guard violation: Spread max delta (${form.spreadMaxShortDelta}Δ) must be strictly less than Tested threshold (${form.testedDelta}Δ)`
+                    : undefined
+                }
+              >
+                <NInput value={form.spreadMaxShortDelta} onChange={(v) => set("spreadMaxShortDelta", v)} />
               </Field>
               <Field
                 label="Spread long wing fallback delta"
@@ -651,7 +684,7 @@ export default function Settings({
                 label="Tested delta threshold"
                 help="Short-leg delta that triggers defense (roll untested side in). Must be higher than max short leg delta."
                 unit="Δ"
-                derived={`Defends when short leg reaches ${form.testedDelta}Δ (safety buffer: +${form.testedDelta - form.maxShortDelta}Δ above max entry)`}
+                derived={`Defends when short leg reaches ${form.testedDelta}Δ (safety buffer: +${form.testedDelta - Math.max(form.maxShortDelta, form.spreadMaxShortDelta)}Δ above max entry)`}
               >
                 <NInput value={form.testedDelta} onChange={(v) => set("testedDelta", v)} />
               </Field>
@@ -711,18 +744,18 @@ export default function Settings({
             <Field label="Take-profit" help="Close a winning trade at this percentage of max credit received (or at 1/3 spread width for defined-risk spreads, whichever is smaller)." unit="%">
               <NInput value={form.takeProfit} onChange={(v) => set("takeProfit", v)} />
             </Field>
-            <Field label="Manage at DTE" help="Roll out / manage defense when a position reaches this DTE (default: 21 DTE)." unit="DTE">
+            <Field label="Manage at DTE" help="Roll out / manage defense when a position reaches this DTE (default: 14 DTE)." unit="DTE">
               <NInput value={form.manageDte} onChange={(v) => set("manageDte", v)} />
             </Field>
             <Field
               label="Tested delta threshold"
               help="Short-leg delta that triggers defense (roll untested side in). Must be higher than max short leg delta."
               unit="Δ"
-              derived={`Defends when short leg reaches ${form.testedDelta}Δ (safety buffer: +${form.testedDelta - form.maxShortDelta}Δ above max entry)`}
+              derived={`Defends when short leg reaches ${form.testedDelta}Δ (safety buffer: +${form.testedDelta - Math.max(form.maxShortDelta, form.spreadMaxShortDelta)}Δ above max entry)`}
             >
               <NInput value={form.testedDelta} onChange={(v) => set("testedDelta", v)} />
             </Field>
-            <Field label="Use hard stop" help="Off by default — tastytrade mechanics prefer managing at 21 DTE rather than stopping out.">
+            <Field label="Use hard stop" help="Off by default — tastytrade mechanics prefer managing at 14 DTE rather than stopping out.">
               <Switch checked={form.hardStop} onCheckedChange={(v) => set("hardStop", v)} aria-label="Hard stop" />
             </Field>
             <Field label="Stop-loss multiple" help="Close at this multiple of credit received when hard stop is enabled (e.g. 2.0× credit)." unit="×">
@@ -755,6 +788,14 @@ export default function Settings({
               derived={`= ${fmtMoney0(Math.round((form.working_capital * form.bpTotal) / 100))} total capacity`}
             >
               <NInput value={form.bpTotal} onChange={(v) => set("bpTotal", v)} />
+            </Field>
+            <Field
+              label="Max defined-risk spread BP"
+              help="Maximum portfolio buying power allocated to defined-risk spreads and iron condors."
+              unit="%"
+              derived={`= ${fmtMoney0(Math.round((form.working_capital * form.bpSpreadCap) / 100))} spread capacity`}
+            >
+              <NInput value={form.bpSpreadCap} onChange={(v) => set("bpSpreadCap", v)} />
             </Field>
             <Field label="Max positions" help="Hard cap on concurrent open trades across all tickers." unit="open">
               <NInput value={form.maxPos} onChange={(v) => set("maxPos", v)} />

@@ -25,6 +25,9 @@ def test_naked_call_differs_from_put_at_high_milestones():
 
 def test_below_first_milestone_returns_none():
     assert ahead_of_pace_milestone(Strategy.SHORT_STRANGLE, 0.10, 3) is None
+    # 20% early micro-exit was removed so fast winners aren't snipped too early
+    assert ahead_of_pace_milestone(Strategy.SHORT_STRANGLE, 0.23, 1) is None
+    assert ahead_of_pace_milestone(Strategy.PUT_CREDIT_SPREAD, 0.23, 1) is None
 
 
 def test_strategy_without_schedule_returns_none():
