@@ -22,7 +22,11 @@ from dataclasses import dataclass, field
 from ..config import RiskLimits, StrategyParams
 from ..models import CandidateTrade
 from ..risk.limits import PortfolioState, check_new_entry
-from ..strategy.guardrails import is_vix_below_min, validate_candidate
+from ..strategy.guardrails import (
+    iron_condor_vix_rejection,
+    is_vix_below_min,
+    validate_candidate,
+)
 from ..strategy.sizing import entry_bp_per_contract, size_trade
 from .llm import LLMDecision, select_trades
 
@@ -113,13 +117,18 @@ def _evaluate_candidate(
     running_undefined_bp: float,
     open_positions: int,
     symbol_positions: int,
+    vix: float | None,
     requested_contracts: int | None = None,
 ) -> tuple[int, str | None, str | None]:
     """Validate guardrails, sizing, and portfolio risk for one candidate.
 
     Returns `(contracts, failure_stage, reason)` where `failure_stage` is one of
-    `"guardrail"`, `"sizing"`, `"risk"`, or `None` when feasible.
+    `"vix"`, `"guardrail"`, `"sizing"`, `"risk"`, or `None` when feasible.
     """
+    vix_rejection = iron_condor_vix_rejection(cand.strategy, vix)
+    if vix_rejection is not None:
+        return 0, "vix", vix_rejection
+
     gr = validate_candidate(cand, params)
     if not gr.ok:
         return 0, "guardrail", "guardrail: " + "; ".join(gr.violations)
@@ -244,10 +253,11 @@ async def run_cycle(
             running_undefined_bp=portfolio.undefined_bp_used,
             open_positions=portfolio.open_positions,
             symbol_positions=portfolio.positions_by_symbol.get(c.symbol, 0),
+            vix=vix,
         )
         if stage is None:
             feasible.append(c)
-        elif stage in {"sizing", "risk"} and reason is not None:
+        elif stage in {"vix", "sizing", "risk"} and reason is not None:
             pre_rejected.append((c, reason))
 
     if not feasible:
@@ -286,6 +296,7 @@ async def run_cycle(
             open_positions=sum(counts.values()),
             symbol_positions=counts[cand.symbol],
             requested_contracts=sel.contracts,
+            vix=vix,
         )
         if contracts < 1:
             if reason is not None:

@@ -55,7 +55,7 @@ def build_regime(
         note = "moderate IV — sell premium where IV rank is locally elevated"
 
     return {
-        "vix": round(float(vix), 2) if vix is not None else None,
+        "vix": float(vix) if vix is not None else None,
         "avg_iv_rank": round(avg, 3),
         "high_ivr_symbols": high,
         "iv_ranks": {s: round(r, 3) for s, r in sorted(iv_ranks.items())},

@@ -10,7 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..config import StrategyParams
-from ..models import CandidateTrade
+from ..models import CandidateTrade, Strategy
+
+MAX_IRON_CONDOR_ENTRY_VIX = 25.0
 
 # Indices and broad sector/commodity/bond ETFs have lower upside crash velocity on
 # call spreads than single equities and use `index_call_min_credit_width_ratio`.
@@ -221,3 +223,16 @@ def is_vix_below_min(vix: float | None, params: StrategyParams) -> bool:
         and vix is not None
         and float(vix) < params.min_vix
     )
+
+
+def iron_condor_vix_rejection(strategy: Strategy | str, vix: float | None) -> str | None:
+    """Reject new iron condors only when the observed VIX exceeds the entry cap."""
+    if strategy != Strategy.IRON_CONDOR or vix is None:
+        return None
+    level = float(vix)
+    if level > MAX_IRON_CONDOR_ENTRY_VIX:
+        return (
+            f"vix guard: VIX {level} > {MAX_IRON_CONDOR_ENTRY_VIX:g}. "
+            "New iron condor positions are blocked."
+        )
+    return None

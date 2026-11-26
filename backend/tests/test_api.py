@@ -1,3 +1,6 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -9,7 +12,7 @@ from tastyagent.config import TradingMode
 from tastyagent.db.session import init_db
 from tastyagent.portfolio.ledger import Ledger
 
-from .conftest import make_candidate
+from .conftest import make_candidate, make_iron_condor
 
 
 def shared_factory():
@@ -240,6 +243,40 @@ def test_approval_flow():
     res = client.post(f"/api/approvals/{tid}/approve").json()
     assert res["action"] == "placed"
     assert client.get("/api/approvals").json() == []  # no longer pending
+
+
+def test_approval_rechecks_vix_for_a_previously_queued_iron_condor(monkeypatch):
+    sf = shared_factory()
+    with sf() as session:
+        lg = Ledger(session)
+        trade_id = lg.record_planned(
+            make_iron_condor(), 1, "pending", TradingMode.LIVE_APPROVAL
+        ).id
+    placer = AsyncMock(return_value="ORD1")
+    data_session = object()
+    broker = SimpleNamespace(
+        data_ib=data_session,
+        active_trading_ib=None,
+        get_account_cash_summary=AsyncMock(
+            return_value=SimpleNamespace(cushion=0.80)
+        ),
+    )
+    read_vix = AsyncMock(side_effect=[25.001, 25.0])
+    monkeypatch.setattr("tastyagent.ibkr.marketdata.get_vix_level", read_vix)
+    client = TestClient(
+        create_app(sf, Runtime(mode=TradingMode.LIVE_APPROVAL, placer=placer), client=broker)
+    )
+
+    blocked = client.post(f"/api/approvals/{trade_id}/approve")
+    assert blocked.status_code == 409
+    assert "iron condor" in blocked.json()["detail"]
+    placer.assert_not_awaited()
+
+    allowed = client.post(f"/api/approvals/{trade_id}/approve")
+    assert allowed.status_code == 200
+    assert allowed.json()["action"] == "placed"
+    assert placer.await_count == 1
+    assert [call.args for call in read_vix.await_args_list] == [(data_session,), (data_session,)]
 
 
 def test_connection_endpoint():

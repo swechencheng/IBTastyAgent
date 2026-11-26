@@ -705,8 +705,11 @@ def create_app(
         s: Session = Depends(get_session),
         rt: Runtime = Depends(get_runtime),
     ) -> ActionResult:
+        from ..ibkr.marketdata import get_vix_level
+        from ..models import Strategy
         from ..risk.entry import check_order_entry
         from ..runner import make_placer
+        from ..strategy.guardrails import iron_condor_vix_rejection
 
         async with app.state.order_lock:
             ledger = Ledger(s)
@@ -721,6 +724,12 @@ def create_app(
                 if not rt.use_custom_working_capital:
                     capital = cash.total_cash_usd
                 cushion = cash.cushion
+                if trade.strategy == Strategy.IRON_CONDOR:
+                    vix = await get_vix_level(client.data_ib or client.active_trading_ib)
+                    rejection = iron_condor_vix_rejection(trade.strategy, vix)
+                    if rejection is not None:
+                        raise HTTPException(409, rejection)
+
             def guard(t):
                 check_order_entry(ledger, t, rt, capital, cushion)
             try:

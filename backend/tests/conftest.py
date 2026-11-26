@@ -56,6 +56,22 @@ def make_candidate(**overrides) -> CandidateTrade:
     return CandidateTrade(**defaults)
 
 
+def make_iron_condor() -> CandidateTrade:
+    return make_candidate(
+        strategy=Strategy.IRON_CONDOR,
+        legs=(
+            make_leg(OptionType.PUT, 90, Action.SELL_TO_OPEN, -0.30),
+            make_leg(OptionType.PUT, 85, Action.BUY_TO_OPEN, -0.10),
+            make_leg(OptionType.CALL, 110, Action.SELL_TO_OPEN, 0.30),
+            make_leg(OptionType.CALL, 115, Action.BUY_TO_OPEN, 0.10),
+        ),
+        net_credit=150.0,
+        max_profit=150.0,
+        max_loss=350.0,
+        buying_power_reduction=350.0,
+    )
+
+
 def make_position(
     *,
     strategy: Strategy = Strategy.SHORT_STRANGLE,

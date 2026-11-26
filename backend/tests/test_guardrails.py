@@ -252,7 +252,7 @@ async def test_get_vix_level_fallback_to_yahoo(monkeypatch):
     mock_resp = MagicMock()
     mock_resp.raise_for_status = MagicMock()
     mock_resp.json.return_value = {
-        "chart": {"result": [{"meta": {"regularMarketPrice": 14.35}}]}
+        "chart": {"result": [{"meta": {"regularMarketPrice": 25.001}}]}
     }
 
     class FakeAsyncClient:
@@ -272,4 +272,4 @@ async def test_get_vix_level_fallback_to_yahoo(monkeypatch):
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
     val = await marketdata.get_vix_level(None)
-    assert val == 14.35
+    assert val == 25.001

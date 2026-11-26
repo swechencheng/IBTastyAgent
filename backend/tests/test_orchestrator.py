@@ -4,11 +4,17 @@ Verifies the safety-critical part: whatever the LLM returns is re-validated agai
 guardrails, sizing, and portfolio risk before becoming a planned trade.
 """
 
+from dataclasses import replace
+from unittest.mock import AsyncMock
+
+import pytest
+
 from tastyagent.config import RiskLimits, StrategyParams
+from tastyagent.decision.context import build_regime
 from tastyagent.decision.llm import LLMDecision, LLMTradeSelection, candidate_id
 from tastyagent.decision.orchestrator import PortfolioInput, run_cycle
 
-from .conftest import make_candidate
+from .conftest import make_candidate, make_iron_condor
 
 PARAMS = StrategyParams()
 # Pin per-trade cap so sizing assertions don't depend on the default.
@@ -223,8 +229,6 @@ async def test_infeasible_candidates_filtered_before_llm_and_summary_enriched():
 
 
 async def test_low_vix_halts_new_entries_when_enabled():
-    from dataclasses import replace
-
     good = make_candidate(symbol="SPY", buying_power_reduction=2000.0)
     called = False
 
@@ -269,3 +273,97 @@ async def test_low_vix_halts_new_entries_when_enabled():
         selector=selector_picking([(0, 1)]),
     )
     assert len(res_disabled.planned) == 1
+
+
+@pytest.mark.parametrize("enforce_min", [True, False])
+async def test_high_vix_hides_iron_condor_before_llm(enforce_min):
+    params = replace(PARAMS, enforce_min_vix=enforce_min)
+    condor = make_iron_condor()
+    strangle = make_candidate(symbol="QQQ")
+    selector = AsyncMock(side_effect=selector_picking([(0, 1)]))
+
+    result = await run_cycle(
+        [condor, strangle],
+        portfolio(),
+        build_regime({}, params, 25.001),
+        params,
+        LIMITS,
+        selector=selector,
+    )
+
+    assert selector.await_args.args[0] == [strangle]
+    assert result.considered == 1
+    assert [plan.candidate for plan in result.planned] == [strangle]
+    assert len(result.rejected) == 1
+    rejected, reason = result.rejected[0]
+    assert rejected == condor
+    assert "vix guard:" in reason.lower() and "iron condor" in reason.lower()
+
+
+@pytest.mark.parametrize("vix", [24.999, 25.0])
+async def test_vix_at_or_below_25_allows_iron_condor(vix):
+    condor = make_iron_condor()
+
+    result = await run_cycle(
+        [condor],
+        portfolio(),
+        build_regime({}, PARAMS, vix),
+        PARAMS,
+        LIMITS,
+        selector=selector_picking([(0, 1)]),
+    )
+
+    assert result.considered == 1
+    assert [plan.candidate for plan in result.planned] == [condor]
+
+
+async def test_high_vix_skips_llm_if_only_condors_are_available():
+    condor = make_iron_condor()
+    selector = AsyncMock()
+
+    result = await run_cycle(
+        [condor],
+        portfolio(),
+        build_regime({}, PARAMS, 30.0),
+        PARAMS,
+        LIMITS,
+        selector=selector,
+    )
+
+    selector.assert_not_awaited()
+    assert result.considered == 0
+    assert result.planned == []
+    assert len(result.rejected) == 1
+    assert result.rejected[0][0] == condor
+
+
+async def test_high_vix_rechecks_condor_policy_after_llm_selection():
+    condor = make_iron_condor()
+    strangle = make_candidate(symbol="QQQ")
+
+    async def stale_selector(candidates, port_summary, regime):
+        assert candidates == [strangle]
+        condor_id = candidate_id(condor, 0)
+        return (
+            LLMDecision(
+                selections=[
+                    LLMTradeSelection(
+                        candidate_id=condor_id, contracts=1, rationale="stale candidate"
+                    )
+                ],
+                commentary="picked a stale candidate",
+            ),
+            {condor_id: condor},
+        )
+
+    result = await run_cycle(
+        [condor, strangle],
+        portfolio(),
+        build_regime({}, PARAMS, 30.0),
+        PARAMS,
+        LIMITS,
+        selector=stale_selector,
+    )
+
+    assert result.considered == 1
+    assert result.planned == []

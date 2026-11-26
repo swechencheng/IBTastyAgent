@@ -253,7 +253,7 @@ async def _fetch_vix_ibkr(ib: Optional[IB], timeout: float = 3.0) -> Optional[fl
                 ):
                     px = _positive_finite(candidate)
                     if px is not None:
-                        return round(px, 2)
+                        return px
         finally:
             ib.cancelMktData(vix)
 
@@ -271,7 +271,7 @@ async def _fetch_vix_ibkr(ib: Optional[IB], timeout: float = 3.0) -> Optional[fl
         if bars:
             px = _positive_finite(bars[-1].close)
             if px is not None:
-                return round(px, 2)
+                return px
     except Exception as e:
         logger.debug("IBKR VIX lookup unavailable: %s", e)
     return None
@@ -292,12 +292,12 @@ async def _fetch_vix_yahoo(timeout: float = 6.0) -> Optional[float]:
         result = resp.json()["chart"]["result"][0]
         meta_px = _positive_finite(result.get("meta", {}).get("regularMarketPrice"))
         if meta_px is not None:
-            return round(meta_px, 2)
+            return meta_px
         closes = result.get("indicators", {}).get("quote", [{}])[0].get("close", [])
         for close in reversed(closes):
             px = _positive_finite(close)
             if px is not None:
-                return round(px, 2)
+                return px
     except Exception as e:
         logger.debug("Yahoo VIX lookup failed: %s", e)
     return None
