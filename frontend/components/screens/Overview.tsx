@@ -119,6 +119,12 @@ export default function Overview({ goTo }: { goTo: (r: string) => void }) {
         <BuyingPowerCard total={total} used={used} remaining={Math.max(0, total - used)} pctUsed={total > 0 ? (used / total) * 100 : 0} />
       </div>
 
+      {(p.unverified_count ?? 0) > 0 && (
+        <p className="mb-4 text-sm text-muted-foreground">
+          {p.unverified_count} historical closes await broker executions. Current P&amp;L excludes those estimates. The benchmark chart ends at the last recorded snapshot.
+        </p>
+      )}
+
       {aps.length > 0 && (
         <Card className="mb-[18px] border-warn/40">
           <CardHeader>

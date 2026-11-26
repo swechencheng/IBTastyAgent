@@ -15,9 +15,10 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..config import TradingMode
+from ..config import StrategyParams, TradingMode
 from ..db.models import Decision, Trade, TradeEvent, TradeLeg, TradeStatus, utcnow
 from ..models import CandidateTrade
+from ..strategy.sizing import entry_bp_per_contract
 
 
 class Ledger:
@@ -50,6 +51,7 @@ class Ledger:
         mode: TradingMode | str,
         status: TradeStatus,
         decision: Decision | None,
+        buying_power: float | None = None,
     ) -> Trade:
         mode_val = mode.value if hasattr(mode, "value") else str(mode)
         trade = Trade(
@@ -61,7 +63,10 @@ class Ledger:
             mode=mode_val,
             rationale=rationale,
             entry_credit=candidate.max_profit * contracts,
-            buying_power=candidate.buying_power_reduction * contracts,
+            buying_power=(
+                buying_power if buying_power is not None
+                else entry_bp_per_contract(candidate, StrategyParams()) * contracts
+            ),
             dte_at_entry=candidate.dte,
             current_cost_to_close=candidate.max_profit
             * contracts,  # 0% profit at entry
@@ -88,14 +93,14 @@ class Ledger:
         return trade
 
     def record_planned(
-        self, candidate, contracts, rationale, mode, decision=None
+        self, candidate, contracts, rationale, mode, decision=None, *, buying_power=None
     ) -> Trade:
         """Record a trade awaiting action. Initial status depends on the mode."""
         status = {
             TradingMode.LIVE_APPROVAL: TradeStatus.PENDING_APPROVAL,
             TradingMode.BACKTEST: TradeStatus.PLANNED,
         }.get(mode, TradeStatus.WORKING)
-        return self._new_trade(candidate, contracts, rationale, mode, status, decision)
+        return self._new_trade(candidate, contracts, rationale, mode, status, decision, buying_power)
 
     def record_rejected(self, candidate, reason, mode, decision=None) -> Trade:
         t = self._new_trade(candidate, 0, reason, mode, TradeStatus.REJECTED, decision)
@@ -103,6 +108,8 @@ class Ledger:
 
     # --- status transitions ---
     def mark_working(self, trade: Trade, broker_order_id: str) -> None:
+        if trade.status is TradeStatus.OPEN:
+            return
         trade.status = TradeStatus.WORKING
         trade.broker_order_id = broker_order_id
         self.s.commit()
@@ -113,6 +120,8 @@ class Ledger:
         )
 
     def mark_open(self, trade: Trade, opened_at: datetime | None = None) -> None:
+        if trade.status is TradeStatus.OPEN:
+            return
         trade.status = TradeStatus.OPEN
         trade.opened_at = opened_at or utcnow()
         if trade.entry_date is None and trade.opened_at is not None:

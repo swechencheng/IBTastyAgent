@@ -22,6 +22,8 @@ class PnLSummary:
     wins: int
     losses: int
 
+    unverified_count: int = 0
+
     @property
     def total_pnl(self) -> float:
         return self.realized_pnl + self.unrealized_pnl
@@ -39,8 +41,13 @@ class PnLSummary:
 
 def summarize(trades: Iterable[Trade]) -> PnLSummary:
     realized = unrealized = 0.0
-    open_count = closed_count = wins = losses = 0
+    open_count = closed_count = wins = losses = unverified_count = 0
     for t in trades:
+        if getattr(t, "execution_verified", None) is False:
+            unverified_count += 1
+            continue
+        if getattr(t, "basis_transferred", False):
+            continue
         if t.status is TradeStatus.CLOSED and t.realized_pnl is not None:
             realized += t.realized_pnl
             closed_count += 1
@@ -49,7 +56,7 @@ def summarize(trades: Iterable[Trade]) -> PnLSummary:
             elif t.realized_pnl < 0:
                 losses += 1
         elif t.status in (TradeStatus.OPEN, TradeStatus.WORKING):
-            unrealized += t.entry_credit - t.current_cost_to_close
+            unrealized += t.entry_credit - t.current_cost_to_close - (getattr(t, "entry_commission", 0) or 0)
             open_count += 1
     return PnLSummary(
         realized_pnl=realized,
@@ -58,4 +65,5 @@ def summarize(trades: Iterable[Trade]) -> PnLSummary:
         closed_count=closed_count,
         wins=wins,
         losses=losses,
+        unverified_count=unverified_count,
     )

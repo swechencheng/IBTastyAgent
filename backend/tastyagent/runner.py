@@ -8,7 +8,6 @@ audit take-profit orders -> persist equity snapshot.
 
 from __future__ import annotations
 
-import asyncio
 from datetime import date
 import logging
 from typing import Optional
@@ -17,17 +16,19 @@ from ib_async import Option
 from sqlalchemy.orm import Session
 
 from .config import TradingMode
-from .db.models import EquitySnapshot, Trade, TradeLeg, TradeStatus
+from .db.models import Trade, TradeLeg
 from .decision.context import DEFAULT_WATCHLIST, gather_context, rank_universe
 from .decision.orchestrator import PortfolioInput, run_cycle
 from .execution.executor import Executor
+from .execution import roll_orders
+from .execution.reconciliation import (
+    bind_order, broker_account, outstanding_tp_ref, prepare_order, reconcile_broker_activity,
+)
 from .execution.exit_manager import (
     PositionMark,
-    RollResult,
     audit_take_profit_orders,
     manage_exits,
 )
-from .execution.tracker import reconcile_fills
 from .ibkr.client import IBKRClient
 from .ibkr.marketdata import (
     get_option_chain_parameters,
@@ -39,9 +40,7 @@ from .ibkr.marketdata import (
 from .ibkr.placer import IBKRPlacer
 from .ibkr.scanner import scan_high_options_volume
 from .models import OptionType, Strategy
-from .portfolio.benchmark import latest_sp500_close
 from .portfolio.ledger import Ledger
-from .portfolio.pnl import summarize
 from .portfolio.watchlist import WatchlistRepo
 from .ibkr.metrics import get_iv_metrics
 from .strategy.candidates import (
@@ -54,6 +53,8 @@ from .strategy.candidates import (
     generate_candidates,
     pick_expiration,
 )
+from .risk.entry import account_exposure, check_order_entry
+from .risk.session import account_modes, session_losses, unverified_symbols, unverified_trades
 from .strategy.exits import RollKind
 from .strategy.guardrails import (
     INDEX_OR_ETF_SYMBOLS,
@@ -704,6 +705,19 @@ async def _build_roll_candidate(
     return None
 
 
+def make_placer(client, runtime):
+    return IBKRPlacer(
+        client=client,
+        walk_step=runtime.ibkr_walk_step,
+        walk_interval=runtime.ibkr_walk_interval,
+        attach_tp=runtime.ibkr_attach_tp,
+        tp_pct=runtime.ibkr_tp_pct,
+        min_credit_width_ratio=runtime.strategy.min_credit_width_ratio,
+        index_call_min_credit_width_ratio=runtime.strategy.index_call_min_credit_width_ratio,
+        min_cushion_pct=runtime.risk_limits().min_cushion_pct,
+    )
+
+
 async def run_one_cycle(
     *,
     client: IBKRClient,
@@ -753,28 +767,91 @@ async def run_one_cycle(
     # 3. Position & Exit Management (with Attached Take-Profit)
     exit_outcomes = []
     tp_alerts = []
-    placer = (
-        IBKRPlacer(
-            client=client,
-            walk_step=getattr(runtime, "ibkr_walk_step", 0.01),
-            walk_interval=getattr(runtime, "ibkr_walk_interval", 5),
-            attach_tp=getattr(runtime, "ibkr_attach_tp", True),
-            tp_pct=getattr(runtime, "ibkr_tp_pct", 0.50),
-            min_credit_width_ratio=getattr(runtime.strategy, "min_credit_width_ratio", 0.25),
-            min_cushion_pct=getattr(limits, "min_cushion_pct", 0.30),
-        )
-        if runtime.mode in (TradingMode.SANDBOX, TradingMode.LIVE_AUTO)
-        else runtime.placer
-    )
+    placer = make_placer(client, runtime) if runtime.mode in (
+        TradingMode.SANDBOX, TradingMode.LIVE_AUTO
+    ) else runtime.placer
 
     if isinstance(placer, IBKRPlacer):
-        # Audit open positions for missing Take-Profit orders
-        try:
-            open_trades = client.active_trading_ib.openTrades()
-            active_ids = {str(t.order.orderId) for t in open_trades if t.isActive()}
-            tp_alerts = await audit_take_profit_orders(ledger, active_ids)
-        except Exception as e:
-            logger.debug("Take-profit audit failed: %s", e)
+        ib = client.active_trading_ib
+        account = broker_account(client)
+        if not account or not ib.isConnected():
+            raise RuntimeError("Active trading account unavailable for execution reconciliation")
+        reconcile_broker_activity(ledger, ib.trades(), ib.fills(), account=account, mode=runtime.mode)
+        modes = account_modes(runtime.mode)
+
+        def leg_key(symbol, leg):
+            return symbol, str(leg.expiration), leg.option_type, leg.strike
+
+        uncertain_legs = {
+            leg_key(trade.symbol, leg)
+            for trade in unverified_trades(session, runtime.mode)
+            for leg in trade.legs
+        }
+
+        def eligible(trade):
+            return (
+                trade.mode in modes
+                and trade.execution_verified is not False
+                and not any(leg_key(trade.symbol, leg) in uncertain_legs for leg in trade.legs)
+            )
+
+        async def submit_management(trade, mark_cost, reason, replacement=None, staged=None):
+            from uuid import uuid4
+            kind = "roll" if replacement else "close"
+            ref = f"TastyAgent_{kind.upper()}_{trade.id}_{uuid4().hex}"
+            if replacement:
+                prepared = await roll_orders.prepare_roll_order(
+                    placer, trade, replacement, mark_cost, order_ref=ref,
+                )
+            else:
+                prepared = await roll_orders.prepare_close_order(placer, trade, mark_cost, order_ref=ref)
+            # Qualifying contracts made no order changes. Commit identity before the first network write.
+            intent = prepare_order(
+                ledger, trade, kind, account=account, replacement=replacement,
+                reason=reason, order_ref=ref,
+            )
+            try:
+                if staged is not None:
+                    from .execution.staged_roll import stage_target
+                    stage_target(ledger, intent, staged)
+                intent.spec = {**intent.spec, "bag_action": prepared.order.action}
+                prepared.order.account = account
+                bind_order(ledger, intent, order_id=prepared.order.orderId, status="Submitting")
+                tp_ref = outstanding_tp_ref(ledger, trade.id, account)
+            except Exception:
+                ledger.s.rollback()
+                bind_order(ledger, intent, status="Aborted")
+                raise
+
+            def confirm_tp_cancel(cancelled):
+                reconcile_broker_activity(
+                    ledger, [cancelled], ib.fills(), account=account, mode=runtime.mode,
+                )
+                if str(trade.tp_order_id) == str(cancelled.order.orderId):
+                    trade.tp_order_id = None
+                    ledger.s.commit()
+
+            try:
+                bt = await roll_orders.submit_prepared_order(
+                    placer, trade, prepared, tp_order_ref=tp_ref,
+                    on_tp_cancelled=confirm_tp_cancel,
+                )
+            except roll_orders.RollBlocked as err:
+                bind_order(ledger, intent, status="Aborted")
+                ledger.record_event(trade, "blocked", str(err))
+                raise
+            except BaseException:
+                bind_order(ledger, intent, status="Unknown")
+                raise
+            bind_order(ledger, intent, order_id=bt.order.orderId, perm_id=bt.order.permId,
+                       status=bt.orderStatus.status)
+            reconcile_broker_activity(ledger, [bt], ib.fills(), account=account, mode=runtime.mode)
+            if intent.terminal and not intent.applied:
+                raise roll_orders.RollBlocked(f"{kind.capitalize()} ended with no confirmed fills ({bt.orderStatus.status})")
+            return ref
+
+        async def _close(trade, cost):
+            return await submit_management(trade, cost, "Defensive close")
 
         async def _roll(trade, roll_kind, mark):
             new_cand = await _build_roll_candidate(
@@ -782,6 +859,8 @@ async def run_one_cycle(
             )
             if new_cand is None or new_cand.net_credit <= 0:
                 return None
+            if any(leg_key(new_cand.symbol, leg) in uncertain_legs for leg in new_cand.legs):
+                raise roll_orders.RollBlocked("Replacement overlaps a pending historical execution")
 
             orig_exp = min(
                 (leg.expiration for leg in trade.legs), default=date.today()
@@ -804,36 +883,29 @@ async def run_one_cycle(
                     "; ".join(gr.violations),
                 )
                 return None
-            await placer.close(trade, mark.cost_to_close)
             try:
-                new_order_id = await placer.open_candidate(new_cand, trade.contracts)
-            except Exception as e:
-                logger.error(
-                    "Roll close executed for Trade #%s, but opening replacement failed: %s. Marking original trade as closed.",
-                    trade.id,
-                    e,
+                return await submit_management(trade, mark.cost_to_close, roll_kind.value, new_cand)
+            except roll_orders.UnsupportedRoll:
+                if roll_kind is not RollKind.OUT:
+                    raise
+                return await submit_management(
+                    trade, mark.cost_to_close, "Close for staged expiry roll", staged=new_cand,
                 )
-                ledger.close_trade(
-                    trade,
-                    exit_debit=mark.cost_to_close,
-                    exit_reason=f"Roll close filled; replacement open failed: {e}",
-                )
-                return None
-
-            return RollResult(
-                new_candidate=new_cand,
-                contracts=trade.contracts,
-                exit_debit=mark.cost_to_close,
-                new_order_id=new_order_id,
-            )
 
         exit_outcomes = await manage_exits(
             ledger,
             params,
             mark_fn=lambda t: _live_mark(client, t),
-            close_fn=placer.close,
+            close_fn=_close,
+            eligible=eligible,
             roll_fn=_roll,
         )
+
+        if placer.attach_tp:
+            visible_ids = {str(t.order.orderId) for t in ib.openTrades() if t.isActive()}
+            tp_alerts = await audit_take_profit_orders(
+                ledger, visible_ids, auto_attach_fn=placer.attach_take_profit, eligible=eligible
+            )
 
     # Check account cushion from IBKR
     cash_summary = await client.get_account_cash_summary()
@@ -855,30 +927,36 @@ async def run_one_cycle(
             limits.min_cushion_pct * 100,
         )
 
-    open_trades_list = ledger.open_trades()
-    bp_used = sum(t.buying_power for t in open_trades_list)
-    spread_bp_used = sum(
-        t.buying_power
-        for t in open_trades_list
-        if str(getattr(t.strategy, "value", t.strategy)).lower()
-        in ("put_credit_spread", "call_credit_spread", "iron_condor")
+    if isinstance(placer, IBKRPlacer):
+        from .execution.staged_roll import resume_staged_rolls
+
+        def guarded_entry(trade):
+            check_order_entry(ledger, trade, runtime, net_liq, cushion)
+
+        placer.entry_guard = guarded_entry
+
+        def make_reopen(minimum_credit):
+            replacement_placer = make_placer(client, runtime)
+            replacement_placer.entry_guard = guarded_entry
+            replacement_placer.additional_min_credit = minimum_credit
+            return replacement_placer
+
+        await resume_staged_rolls(
+            ledger, make_reopen, account=account, mode=runtime.mode, params=params,
+        )
+    counts, losing_symbols, spread_bp_used, undefined_bp_used = account_exposure(
+        ledger, runtime.mode, params,
     )
-    undefined_bp_used = sum(
-        t.buying_power
-        for t in open_trades_list
-        if str(getattr(t.strategy, "value", t.strategy)).lower()
-        not in ("put_credit_spread", "call_credit_spread", "iron_condor")
-    )
-    losing_symbols = {
-        t.symbol
-        for t in open_trades_list
-        if t.unrealized_pnl < 0
-    }
+    losses = session_losses(session, runtime.mode, net_liq, limits)
+    quarantined = unverified_symbols(session, runtime.mode)
+    universe = [symbol for symbol in universe if symbol not in quarantined]
 
     portfolio = PortfolioInput(
         net_liq=net_liq,
-        bp_used=bp_used,
-        positions_by_symbol=ledger.positions_by_symbol(),
+        bp_used=spread_bp_used + undefined_bp_used,
+        positions_by_symbol=dict(counts),
+        realized_pnl_today=losses.realized,
+        consecutive_losses=losses.streak,
         cushion=cushion,
         is_live=is_live_mode,
         losing_symbols=losing_symbols,
@@ -886,7 +964,11 @@ async def run_one_cycle(
         undefined_bp_used=undefined_bp_used,
     )
 
-    if cushion_blocked:
+    if losses.halt_reason:
+        top_symbols, candidates = [], []
+        regime = {"entry_halt": losses.halt_reason}
+        logger.warning("%s", losses.halt_reason)
+    elif cushion_blocked:
         top_symbols = []
         candidates = []
         regime = {"cushion": cushion, "cushion_guard_active": True}
@@ -947,7 +1029,7 @@ async def run_one_cycle(
     result = await run_cycle(candidates, portfolio, regime, params, limits)
     decision = ledger.record_decision(
         runtime.mode.value if hasattr(runtime.mode, "value") else str(runtime.mode),
-        result.commentary,
+        losses.halt_reason or result.commentary,
         result.considered,
     )
 
@@ -977,7 +1059,7 @@ async def run_one_cycle(
         "closed": sum(1 for o in exit_outcomes if o.action == "closed"),
         "alerts": tp_alerts,
         "outcomes": [o.__dict__ for o in outcomes],
-        "commentary": result.commentary,
+        "commentary": losses.halt_reason or result.commentary,
         "net_liq": net_liq,
         "open_positions": len(ledger.open_trades()),
         "universe_size": len(universe),

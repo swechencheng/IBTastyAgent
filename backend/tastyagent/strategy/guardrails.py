@@ -49,6 +49,12 @@ class GuardrailResult:
         return cls(ok=True, violations=())
 
 
+def entry_width_ratio(symbol: str, strategy: str, default: float, index_call: float) -> float:
+    if strategy == "call_credit_spread" and symbol.upper() in INDEX_OR_ETF_SYMBOLS:
+        return index_call
+    return default
+
+
 def _check_wing_geometry(candidate: CandidateTrade) -> list[str]:
     """Ensure multi-leg trades do not invert strikes or invert protective wings."""
     v: list[str] = []
@@ -107,14 +113,9 @@ def validate_candidate(
         if width is not None and width > 0:
             credit_ps = candidate.net_credit / 100.0
             ratio = credit_ps / width
-            is_index_call = (
-                candidate.symbol.upper() in INDEX_OR_ETF_SYMBOLS
-                and candidate.strategy.value == "call_credit_spread"
-            )
-            min_ratio = (
-                params.index_call_min_credit_width_ratio
-                if is_index_call
-                else params.min_credit_width_ratio
+            min_ratio = entry_width_ratio(
+                candidate.symbol, candidate.strategy.value,
+                params.min_credit_width_ratio, params.index_call_min_credit_width_ratio,
             )
             if ratio < min_ratio:
                 v.append(

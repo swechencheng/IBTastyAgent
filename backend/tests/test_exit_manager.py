@@ -3,7 +3,7 @@ from datetime import date, timedelta
 from tastyagent.config import StrategyParams, TradingMode
 from tastyagent.db.models import TradeStatus
 from tastyagent.db.session import in_memory_session
-from tastyagent.execution.exit_manager import PositionMark, RollResult, manage_exits
+from tastyagent.execution.exit_manager import PositionMark, manage_exits
 from tastyagent.models import Action, Leg, OptionType
 from tastyagent.portfolio.ledger import Ledger
 from tastyagent.strategy.exits import RollKind
@@ -38,12 +38,7 @@ class FakeRoll:
         self.calls.append((trade.id, roll_kind))
         if not self.result:
             return None
-        return RollResult(
-            new_candidate=make_candidate(symbol=trade.symbol),
-            contracts=trade.contracts,
-            exit_debit=m.cost_to_close,
-            new_order_id=f"R{trade.id}",
-        )
+        return f"R{trade.id}"
 
 
 def make_open_trade(lg, *, exp_days, entry_days_ago, max_profit=250.0, contracts=1):
@@ -93,8 +88,8 @@ async def test_take_profit_closes():
     out = await manage_exits(
         lg, PARAMS, mark_fn=mark(125.0), close_fn=closer, roll_fn=FakeRoll()
     )
-    assert out[0].action == "closed"
-    assert t.status is TradeStatus.CLOSED and t.realized_pnl == 125.0
+    assert out[0].action == "submitted"
+    assert t.status is TradeStatus.OPEN and t.realized_pnl is None
     assert closer.calls == [(t.id, 125.0)]
 
 
@@ -116,13 +111,11 @@ async def test_roll_out_at_14_dte_records_new_trade():
     out = await manage_exits(
         lg, PARAMS, mark_fn=mark(200.0), close_fn=closer, roll_fn=roller
     )
-    assert out[0].action == "rolled"
+    assert out[0].action == "submitted"
     assert roller.calls == [(t.id, RollKind.OUT)]
-    assert t.status is TradeStatus.CLOSED  # old cycle closed
-    assert t.realized_pnl == 50.0  # 250 - 200
-    # a new WORKING trade was opened from the roll
-    working = [x for x in lg.all_trades() if x.status is TradeStatus.WORKING]
-    assert len(working) == 1 and working[0].broker_order_id == f"R{t.id}"
+    assert t.status is TradeStatus.OPEN
+    assert t.realized_pnl is None
+    assert not any(x.status is TradeStatus.WORKING for x in lg.all_trades())
 
 
 async def test_roll_untested_when_tested():
@@ -136,7 +129,7 @@ async def test_roll_untested_when_tested():
         close_fn=FakeClose(),
         roll_fn=roller,
     )
-    assert out[0].action == "rolled"
+    assert out[0].action == "submitted"
     assert roller.calls == [(t.id, RollKind.UNTESTED)]
 
 
@@ -147,10 +140,10 @@ async def test_roll_falls_back_to_close_without_credit():
     out = await manage_exits(
         lg, PARAMS, mark_fn=mark(200.0), close_fn=closer, roll_fn=FakeRoll(result=None)
     )
-    assert out[0].action == "closed"
+    assert out[0].action == "submitted"
     assert "no credit roll" in out[0].reason
     assert closer.calls == [(t.id, 200.0)]
-    assert t.status is TradeStatus.CLOSED
+    assert t.status is TradeStatus.OPEN
 
 
 async def test_roll_untested_without_credit_holds():

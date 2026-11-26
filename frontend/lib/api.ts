@@ -28,6 +28,7 @@ export interface Status {
 }
 
 export interface Pnl {
+  unverified_count?: number;
   realized_pnl: number;
   unrealized_pnl: number;
   total_pnl: number;
@@ -63,6 +64,8 @@ export interface TradeEvent {
 }
 
 export interface Trade {
+  execution_verified?: boolean | null;
+  basis_transferred?: boolean;
   id: number;
   symbol: string;
   strategy: string;

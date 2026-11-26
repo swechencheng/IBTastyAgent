@@ -103,7 +103,7 @@ async def test_placer_error_cancels_trade():
     assert lg.all_trades()[-1].status is TradeStatus.CANCELED
 
 
-def test_tracker_reconciles_fill_and_marks():
+def test_status_without_scoped_execution_does_not_open_trade():
     lg = Ledger(in_memory_session())
     d = lg.record_decision(TradingMode.SANDBOX, "", 0)
     t = lg.record_planned(
@@ -111,18 +111,19 @@ def test_tracker_reconciles_fill_and_marks():
     )
     lg.mark_working(t, "ORD1")
     reconcile_fills(lg, {"ORD1": "Filled"})
-    assert t.status is TradeStatus.OPEN
+    assert t.status is TradeStatus.WORKING
+    lg.mark_open(t)
     apply_marks(lg, {t.id: 120.0})
     assert t.current_cost_to_close == 120.0
 
 
-def test_tracker_cancels_dead_order():
+def test_unscoped_order_id_does_not_cancel_an_owned_trade():
     lg = Ledger(in_memory_session())
     d = lg.record_decision(TradingMode.SANDBOX, "", 0)
     t = lg.record_planned(make_candidate(), 1, "r", TradingMode.SANDBOX, d)
     lg.mark_working(t, "ORD9")
     reconcile_fills(lg, {"ORD9": "Rejected"})
-    assert t.status is TradeStatus.CANCELED
+    assert t.status is TradeStatus.WORKING
 
 
 import asyncio as _asyncio

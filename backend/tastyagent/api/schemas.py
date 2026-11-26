@@ -62,6 +62,9 @@ class TradeOut(BaseModel):
     probability_of_profit: float
     realized_pnl: float | None
     exit_reason: str | None
+    execution_verified: bool | None = None
+    basis_transferred: bool = False
+    commission: float = 0.0
     is_win: bool | None
     opened_at: datetime | None
     closed_at: datetime | None
@@ -81,6 +84,7 @@ class TradeOut(BaseModel):
 
 
 class PnLOut(BaseModel):
+    unverified_count: int = 0
     realized_pnl: float
     unrealized_pnl: float
     total_pnl: float

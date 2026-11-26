@@ -14,15 +14,21 @@ executor never imports the broker directly, so its routing logic is unit-testabl
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Awaitable, Callable
+
+from sqlalchemy import select, update
 
 from ..config import TradingMode
-from ..db.models import Decision, Trade, TradeStatus
+from ..db.models import Decision, ExecutionOrder, Trade, TradeStatus
 from ..decision.orchestrator import CycleResult
 from ..portfolio.ledger import Ledger
 
 Placer = Callable[[Trade], Awaitable[str]]
+
+
+class EntryUnfilledError(RuntimeError):
+    """The broker positively confirmed that the last entry order ended unfilled."""
 
 
 @dataclass
@@ -44,18 +50,66 @@ class Executor:
     def _places_immediately(self) -> bool:
         return self.mode in (TradingMode.SANDBOX, TradingMode.LIVE_AUTO)
 
+    def _update_entry(
+        self, trade: Trade, statuses: tuple[TradeStatus, ...], **values
+    ) -> bool:
+        result = self.ledger.s.execute(
+            update(Trade)
+            .where(Trade.id == trade.id, Trade.status.in_(statuses))
+            .values(**values)
+        )
+        self.ledger.s.commit()
+        self.ledger.s.refresh(trade)
+        return result.rowcount == 1
+
+    def _placement_error(
+        self, trade: Trade, reason: str, *, unfilled: bool = False
+    ) -> None:
+        if trade.status not in (TradeStatus.WORKING, TradeStatus.PENDING_APPROVAL):
+            return
+        pending = self.ledger.s.scalar(
+            select(ExecutionOrder.id).where(
+                ExecutionOrder.trade_id == trade.id,
+                ExecutionOrder.kind == "entry",
+                ExecutionOrder.terminal.is_(False),
+            ).limit(1)
+        )
+        if pending or ((trade.order_ref or trade.broker_order_id) and not unfilled):
+            self.ledger.record_event(
+                trade, "working", f"{reason}; awaiting broker reconciliation"
+            )
+        elif self._update_entry(
+            trade,
+            (TradeStatus.WORKING, TradeStatus.PENDING_APPROVAL),
+            status=TradeStatus.CANCELED,
+            exit_reason=reason,
+        ):
+            self.ledger.record_event(trade, "canceled", reason)
+
     async def _place(self, trade: Trade) -> ExecOutcome:
         if self.placer is None:
             return ExecOutcome(trade.id, trade.symbol, "error", "no placer configured")
         try:
             order_id = await self.placer(trade)
         except asyncio.CancelledError:
-            self.ledger.cancel_trade(trade, reason="placement canceled during shutdown")
+            self._placement_error(trade, "placement canceled during shutdown")
             raise
         except Exception as e:  # noqa: BLE001 - surface broker errors as outcomes
-            self.ledger.cancel_trade(trade, reason=f"placement error: {e}")
+            self._placement_error(
+                trade,
+                f"placement error: {e}",
+                unfilled=isinstance(e, EntryUnfilledError),
+            )
             return ExecOutcome(trade.id, trade.symbol, "error", str(e))
-        self.ledger.mark_working(trade, order_id)
+        if self._update_entry(
+            trade,
+            (TradeStatus.WORKING, TradeStatus.PENDING_APPROVAL),
+            status=TradeStatus.WORKING,
+            broker_order_id=order_id,
+        ):
+            self.ledger.record_event(
+                trade, "working", f"Order working — submitted to broker (#{order_id})"
+            )
         return ExecOutcome(trade.id, trade.symbol, "placed", f"order {order_id}")
 
     async def execute_cycle(
@@ -75,6 +129,7 @@ class Executor:
                 planned.rationale,
                 self.mode,
                 decision,
+                buying_power=planned.buying_power,
             )
             if self.mode is TradingMode.LIVE_APPROVAL:
                 outcomes.append(
@@ -97,11 +152,28 @@ class Executor:
             return ExecOutcome(
                 trade_id, trade.symbol, "error", f"not pending ({trade.status.value})"
             )
+        if self.placer is None:
+            return ExecOutcome(trade.id, trade.symbol, "error", "no placer configured")
+        if not self._update_entry(
+            trade, (TradeStatus.PENDING_APPROVAL,), status=TradeStatus.WORKING
+        ):
+            return ExecOutcome(
+                trade.id, trade.symbol, "error", "approval already claimed"
+            )
         return await self._place(trade)
 
     def reject(self, trade_id: int, reason: str = "approval denied") -> ExecOutcome:
         trade = self.ledger.get(trade_id)
         if trade is None:
             return ExecOutcome(trade_id, "?", "error", "trade not found")
-        self.ledger.cancel_trade(trade, reason=reason)
+        if not self._update_entry(
+            trade,
+            (TradeStatus.PENDING_APPROVAL,),
+            status=TradeStatus.CANCELED,
+            exit_reason=reason,
+        ):
+            return ExecOutcome(
+                trade.id, trade.symbol, "error", "approval already claimed"
+            )
+        self.ledger.record_event(trade, "canceled", reason)
         return ExecOutcome(trade_id, trade.symbol, "recorded", "canceled")

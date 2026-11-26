@@ -23,7 +23,7 @@ from ..config import RiskLimits, StrategyParams
 from ..models import CandidateTrade
 from ..risk.limits import PortfolioState, check_new_entry
 from ..strategy.guardrails import is_vix_below_min, validate_candidate
-from ..strategy.sizing import size_trade
+from ..strategy.sizing import entry_bp_per_contract, size_trade
 from .llm import LLMDecision, select_trades
 
 
@@ -52,10 +52,13 @@ class PlannedTrade:
     candidate: CandidateTrade
     contracts: int
     rationale: str
+    reserved_bp: float | None = None
 
     @property
     def buying_power(self) -> float:
-        return self.contracts * self.candidate.buying_power_reduction
+        if self.reserved_bp is not None:
+            return self.reserved_bp
+        return self.contracts * entry_bp_per_contract(self.candidate, StrategyParams())
 
 
 @dataclass
@@ -130,6 +133,7 @@ def _evaluate_candidate(
         running_bp,
         limits,
         current_strategy_bp_used=current_strat_bp,
+        params=params,
     )
     contracts = (
         sizing.contracts
@@ -140,7 +144,7 @@ def _evaluate_candidate(
         return 0, "sizing", f"sizing: {sizing.reason}"
 
     eval_contracts = 1 if requested_contracts is None else contracts
-    incremental_bp = eval_contracts * cand.buying_power_reduction
+    incremental_bp = eval_contracts * entry_bp_per_contract(cand, params)
     state = PortfolioState(
         net_liq=portfolio.net_liq,
         bp_used=running_bp,
@@ -288,8 +292,8 @@ async def run_cycle(
                 rejected.append((cand, reason))
             continue
 
-        incremental_bp = contracts * cand.buying_power_reduction
-        planned.append(PlannedTrade(cand, contracts, sel.rationale))
+        incremental_bp = contracts * entry_bp_per_contract(cand, params)
+        planned.append(PlannedTrade(cand, contracts, sel.rationale, incremental_bp))
         running_bp += incremental_bp
         if cand.strategy.is_defined_risk:
             running_spread_bp += incremental_bp

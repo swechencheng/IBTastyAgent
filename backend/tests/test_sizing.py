@@ -7,6 +7,27 @@ from .conftest import make_candidate
 LIMITS = RiskLimits(max_trade_bp_pct=0.05)  # per-trade 5%, total 40%
 
 
+def test_sizing_reserves_credit_at_rounded_floor_with_index_exception():
+    from tastyagent.config import StrategyParams
+    from tastyagent.models import Action, OptionType, Strategy
+    from tastyagent.strategy.sizing import entry_bp_per_contract, minimum_entry_credit
+    from .conftest import make_leg
+
+    assert minimum_entry_credit(1.125, None, 0.25) == 1.02
+    assert minimum_entry_credit(1.25, 5, 0.251) == 1.26
+    legs = (
+        make_leg(OptionType.CALL, 100, Action.SELL_TO_OPEN),
+        make_leg(OptionType.CALL, 105, Action.BUY_TO_OPEN),
+    )
+    candidate = make_candidate(
+        strategy=Strategy.CALL_CREDIT_SPREAD, legs=legs,
+        net_credit=105, max_profit=105, buying_power_reduction=395,
+    )
+    params = StrategyParams(index_call_min_credit_width_ratio=0.20)
+    assert entry_bp_per_contract(candidate, params) == 400
+    assert size_trade(candidate, 7900, 0, LIMITS, params=params).contracts == 0
+
+
 def test_sizes_to_per_trade_cap():
     # net liq 100k -> per-trade budget 5k; BP 2k/contract -> 2 contracts
     c = make_candidate(buying_power_reduction=2000.0)

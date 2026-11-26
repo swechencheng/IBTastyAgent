@@ -343,7 +343,7 @@ async def test_placer_opens_and_closes_single_leg_naked_put_as_direct_option():
     assert len(preflight_contracts) == 1
     assert preflight_contracts[0][0].secType == "OPT"
     assert preflight_contracts[0][1].action == "SELL"
-    assert preflight_contracts[0][1].lmtPrice == 6.20
+    assert preflight_contracts[0][1].lmtPrice == 5.58  # margin at the worst permitted credit
 
     # Opening + TP orders used direct Option with positive prices
     open_contract, open_order = placed[0]

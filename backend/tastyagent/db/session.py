@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -24,20 +24,27 @@ def make_engine(url: str | None = None, *, echo: bool = False) -> Engine:
 
 def init_db(engine: Engine) -> None:
     Base.metadata.create_all(engine)
-    with engine.connect() as conn:
-        try:
-            from sqlalchemy import text
-
-            res = conn.execute(text("PRAGMA table_info(trades)"))
-            cols = {row[1] for row in res.fetchall()}
-            if cols:
-                if "tp_order_id" not in cols:
-                    conn.execute(text("ALTER TABLE trades ADD COLUMN tp_order_id TEXT"))
-                if "order_ref" not in cols:
-                    conn.execute(text("ALTER TABLE trades ADD COLUMN order_ref TEXT"))
-                conn.commit()
-        except Exception:
-            pass
+    # Additive SQLite migrations preserve the original evidence on legacy rows.
+    columns = {col["name"] for col in inspect(engine).get_columns("trades")}
+    additions = {
+        "tp_order_id": "TEXT",
+        "order_ref": "TEXT",
+        "execution_verified": "BOOLEAN",
+        "entry_commission": "FLOAT NOT NULL DEFAULT 0",
+        "commission": "FLOAT NOT NULL DEFAULT 0",
+        "basis_parent_id": "INTEGER",
+        "basis_transferred": "BOOLEAN NOT NULL DEFAULT 0",
+    }
+    with engine.begin() as conn:
+        for name, sql_type in additions.items():
+            if name not in columns:
+                conn.execute(text(f"ALTER TABLE trades ADD COLUMN {name} {sql_type}"))
+        conn.execute(
+            text(
+                "UPDATE trades SET execution_verified = false WHERE execution_verified IS NULL "
+                "AND status='CLOSED' AND exit_reason LIKE 'Roll close filled; replacement open failed:%'"
+            )
+        )
 
 
 def session_factory(engine: Engine) -> sessionmaker[Session]:

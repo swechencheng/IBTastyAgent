@@ -11,15 +11,27 @@ Implements the Placer interface used by the agent runner and executor:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
-from decimal import Decimal
 import logging
+import math
 import re
-from typing import Optional, Tuple
+from collections.abc import Callable
 
-from ib_async import Contract, IB, LimitOrder, Option, Trade as IBTrade
+from ib_async import IB, Contract, LimitOrder, Option
+from sqlalchemy import select, update
+from sqlalchemy.orm import object_session
 
-from ..db.models import Trade, TradeLeg
+from ..db.models import ExecutionOrder, Trade, TradeLeg, TradeStatus
+from ..execution.executor import EntryUnfilledError
+from ..execution.reconciliation import (
+    bind_order,
+    broker_account,
+    prepare_order,
+    reconcile_broker_activity,
+)
+from ..models import Strategy
+from ..portfolio.ledger import Ledger
+from ..strategy.guardrails import entry_width_ratio
+from ..strategy.sizing import minimum_entry_credit
 from .client import IBKRClient
 from .orders import (
     build_closing_tp_order,
@@ -61,6 +73,9 @@ class IBKRPlacer:
         tp_pct: float = 0.50,
         min_credit_width_ratio: float = 0.25,
         min_cushion_pct: float = 0.30,
+        index_call_min_credit_width_ratio: float = 0.20,
+        entry_guard: Callable[[Trade], None] | None = None,
+        additional_min_credit: float = 0.0,
     ) -> None:
         self.client = client
         self.walk_step = walk_step
@@ -69,6 +84,9 @@ class IBKRPlacer:
         self.tp_pct = tp_pct
         self.min_credit_width_ratio = min_credit_width_ratio
         self.min_cushion_pct = min_cushion_pct
+        self.index_call_min_credit_width_ratio = index_call_min_credit_width_ratio
+        self.entry_guard = entry_guard
+        self.additional_min_credit = additional_min_credit
 
     @property
     def ib(self) -> IB:
@@ -150,11 +168,27 @@ class IBKRPlacer:
         contract_kind = "combo" if is_combo else "option"
 
         # 3. Calculate initial credit & floor
+        requested_qty = trade.contracts
+        if not requested_qty or requested_qty < 1:
+            raise ValueError("Opening quantity must be positive")
         target_credit = trade.entry_credit / (100 * trade.contracts)
-        current_credit = round(float(target_credit), 2)
-        min_credit = max(
-            0.05, round(current_credit * 0.70, 2)
-        )  # Walk floor: collect at least 70% of initial estimate
+        width = trade.strike_width
+        if Strategy(trade.strategy).is_defined_risk and (width is None or width <= 0):
+            raise ValueError("Cannot price a defined-risk entry without its strike width")
+        ratio = entry_width_ratio(
+            trade.symbol, trade.strategy, self.min_credit_width_ratio,
+            self.index_call_min_credit_width_ratio,
+        )
+        if not math.isfinite(target_credit) or target_credit <= 0:
+            raise ValueError("Opening midpoint must be positive and finite")
+        if not math.isfinite(self.walk_step) or self.walk_step < 0.01:
+            raise ValueError("Opening walk step must be at least one penny")
+        min_credit = minimum_entry_credit(target_credit, width, ratio, self.additional_min_credit)
+        current_credit = max(min_credit, round(target_credit, 2))
+        session = object_session(trade)
+        ledger = Ledger(session) if session is not None else None
+        intent = None
+        account = broker_account(self.client)
 
         logger.info(
             "  Target Credit: $%.2f | Min Floor: $%.2f | Walk Step: $%.2f | Interval: %ds",
@@ -174,14 +208,55 @@ class IBKRPlacer:
             return build_opening_credit_order(
                 trade.contracts,
                 credit,
-                account=self.client.account,
+                account=account,
                 order_ref=order_ref,
                 is_combo=is_combo,
                 single_leg_action=single_leg_open_action,
             )
 
+        def submit(credit: float, *, replacement: bool = False):
+            nonlocal order_ref, intent
+            if ledger:
+                # Serialize the risk read and preparation across simultaneous entry
+                # requests. Preserve a submitted intent even if its ACK was lost.
+                session.execute(update(Trade).where(Trade.id == trade.id).values(status=Trade.status))
+                session.refresh(trade)
+                active_intent = session.scalar(
+                    select(ExecutionOrder.id).where(
+                        ExecutionOrder.trade_id == trade.id,
+                        ExecutionOrder.kind == "entry",
+                        ExecutionOrder.terminal.is_(False),
+                    ).limit(1)
+                )
+                if active_intent or trade.status not in (TradeStatus.WORKING, TradeStatus.PENDING_APPROVAL):
+                    session.commit()
+                    raise RuntimeError("Entry already managed or awaiting broker reconciliation")
+            if self.entry_guard is not None:
+                try:
+                    self.entry_guard(trade)
+                except Exception as exc:
+                    if ledger:
+                        session.rollback()
+                    if replacement:
+                        raise EntryUnfilledError(str(exc)) from exc
+                    raise
+            if ledger:
+                intent = prepare_order(ledger, trade, "entry", account=account)
+                order_ref = intent.order_ref
+                trade.order_ref = order_ref
+                ledger.s.commit()
+            next_order = _make_open_order(credit)
+            placed = self.ib.placeOrder(contract, next_order)
+            trade.broker_order_id = str(placed.order.orderId)
+            if ledger:
+                bind_order(
+                    ledger, intent, order_id=placed.order.orderId, perm_id=placed.order.permId,
+                    status=placed.orderStatus.status,
+                )
+            return next_order, placed
+
         # 4. Optional Margin Preflight
-        preflight_order = _make_open_order(current_credit)
+        preflight_order = _make_open_order(min_credit)
         await check_margin_preflight(self.ib, contract, preflight_order)
 
         # 4b. Live Cushion Guard check
@@ -200,7 +275,7 @@ class IBKRPlacer:
                 )
 
         # 5. Walk-the-book Execution Loop
-        rejected_market_price: Optional[float] = None
+        rejected_market_price: float | None = None
         auto_heal_attempts = 0
         max_auto_heals = 3
         order = _make_open_order(current_credit)
@@ -222,7 +297,11 @@ class IBKRPlacer:
 
         self.ib.errorEvent += _on_error
 
-        parent_trade = self.ib.placeOrder(contract, order)
+        try:
+            order, parent_trade = submit(current_credit)
+        except BaseException:
+            self.ib.errorEvent -= _on_error
+            raise
         logger.info(
             "  📤 Order #%s submitted: %s %s @ $%.2f credit",
             getattr(order, "orderId", None),
@@ -231,6 +310,7 @@ class IBKRPlacer:
             current_credit,
         )
 
+        cancel_deadline = None
         try:
             while True:
                 await asyncio.sleep(self.walk_interval)
@@ -246,10 +326,22 @@ class IBKRPlacer:
                 )
 
                 # Check for fill (status 'Filled' or filled quantity reached)
-                if status == "Filled" or filled_qty >= trade.contracts:
+                ended = status in ("Cancelled", "ApiCancelled", "Inactive")
+                if status == "Filled" or filled_qty >= requested_qty or (ended and filled_qty > 0):
                     fill_credit = abs(parent_trade.orderStatus.avgFillPrice)
-                    if fill_credit == 0.0:
-                        fill_credit = current_credit
+                    if ledger:
+                        reconcile_broker_activity(
+                            ledger, [parent_trade], list(parent_trade.fills), account=account
+                        )
+                        ledger.s.refresh(intent)
+                        ledger.s.refresh(trade)
+                        if not intent.terminal or intent.applied < 1 or trade.status != TradeStatus.OPEN:
+                            raise RuntimeError("Entry awaiting verified broker executions")
+                        fill_credit = trade.entry_credit / (100 * trade.contracts)
+                    elif ended and filled_qty < requested_qty:
+                        raise RuntimeError("Partial fill requires ledger reconciliation")
+                    elif not fill_credit or not math.isfinite(fill_credit):
+                        raise RuntimeError("Entry filled but average credit unavailable; awaiting executions")
                     logger.info(
                         "  ✅ Filled! Received credit: $%.2f/share ($%.2f total)",
                         fill_credit,
@@ -257,58 +349,31 @@ class IBKRPlacer:
                     )
 
                     # Update trade entry credit to actual fill
-                    trade.entry_credit = round(fill_credit * 100 * trade.contracts, 2)
-                    trade.broker_order_id = str(parent_trade.order.orderId)
+                    if not ledger:
+                        trade.entry_credit = round(fill_credit * 100 * trade.contracts, 2)
+                        trade.current_cost_to_close = trade.entry_credit
+                        if width is not None:
+                            trade.buying_power = max(0.0, round(width * 100 * trade.contracts - trade.entry_credit, 2))
 
-                    # Pre-attach Take Profit limit order at 50% max profit or 1/3 strike width
-                    if self.attach_tp:
-                        is_defined = trade.strategy in (
-                            "iron_condor",
-                            "put_credit_spread",
-                            "call_credit_spread",
-                        )
-                        profit_target_ps = fill_credit * self.tp_pct
-                        target_desc = f"{self.tp_pct:.0%} profit target"
-
-                        if is_defined:
-                            strike_width = trade.strike_width
-                            if strike_width is not None and strike_width > 0:
-                                width_target_ps = strike_width * self.min_credit_width_ratio
-                                # If 33% strike width target > 50% net credit, take 50% net credit.
-                                # Otherwise (width target <= 50% net credit), take width target.
-                                if width_target_ps < profit_target_ps:
-                                    profit_target_ps = width_target_ps
-                                    target_desc = f"1/3 width profit target (${profit_target_ps:.2f})"
-
-                        tp_debit = max(0.01, round(fill_credit - profit_target_ps, 2))
-                        tp_order = build_closing_tp_order(
-                            contracts=trade.contracts,
-                            tp_debit_per_share=tp_debit,
-                            account=self.client.account,
-                            order_ref=f"TastyAgent_TP_{trade.id}",
-                            transmit=True,
-                            is_combo=is_combo,
-                            single_leg_open_action=single_leg_open_action,
-                        )
-                        tp_trade = self.ib.placeOrder(contract, tp_order)
-                        assigned_tp_id = (
-                            getattr(getattr(tp_trade, "order", None), "orderId", None)
-                            or tp_order.orderId
-                        )
-                        trade.tp_order_id = str(assigned_tp_id)
-                        logger.info(
-                            "  🎯 Attached Take-Profit order #%s submitted: %s %s @ $%.2f debit (%s)",
-                            trade.tp_order_id,
-                            tp_order.action,
-                            contract_kind,
-                            tp_debit,
-                            target_desc,
-                        )
+                    await self.attach_take_profit(trade)
 
                     return str(parent_trade.order.orderId)
 
                 # Check if order was rejected / cancelled
-                if status in ("Cancelled", "ApiCancelled", "Inactive"):
+                if ended:
+                    if ledger:
+                        reconcile_broker_activity(ledger, [parent_trade], list(parent_trade.fills), account=account)
+                        ledger.s.refresh(intent)
+                        if not intent.terminal or intent.applied:
+                            raise RuntimeError("Entry cancellation awaiting verified broker quantity")
+                    if cancel_deadline is not None:
+                        if current_credit <= min_credit:
+                            raise EntryUnfilledError(f"No fill at minimum entry credit ${min_credit:.2f}")
+                        current_credit = max(min_credit, round(current_credit - self.walk_step, 2))
+                        cancel_deadline = None
+                        rejected_market_price = None
+                        order, parent_trade = submit(current_credit, replacement=True)
+                        continue
                     if (
                         rejected_market_price is not None
                         and rejected_market_price >= min_credit
@@ -323,40 +388,22 @@ class IBKRPlacer:
                             max_auto_heals,
                             current_credit,
                         )
-                        order = _make_open_order(current_credit)
-                        parent_trade = self.ib.placeOrder(contract, order)
+                        order, parent_trade = submit(current_credit, replacement=True)
                         continue
 
                     logger.error(
                         "  ❌ Order was cancelled or rejected by IBKR (Status: %s)",
                         status,
                     )
-                    raise RuntimeError(f"IBKR order rejected with status {status}")
+                    raise EntryUnfilledError(f"IBKR order rejected with status {status}")
 
                 # Reprice step down towards min_credit
-                current_credit = round(current_credit - self.walk_step, 2)
-                if current_credit < min_credit:
-                    logger.warning(
-                        "  ⛔ Credit $%.2f reached floor $%.2f without filling. Cancelling order.",
-                        current_credit,
-                        min_credit,
-                    )
-                    self.ib.cancelOrder(order)
-                    await asyncio.sleep(1.0)
-                    raise RuntimeError(
-                        f"Walk-the-book timed out at min credit {min_credit}"
-                    )
-
-                # Cancel and Replace to avoid Warning 105
+                if cancel_deadline is not None:
+                    if asyncio.get_running_loop().time() >= cancel_deadline:
+                        raise RuntimeError("Entry cancellation unconfirmed; awaiting broker reconciliation")
+                    continue
                 self.ib.cancelOrder(order)
-                await asyncio.sleep(0.5)
-
-                order = _make_open_order(current_credit)
-                parent_trade = self.ib.placeOrder(contract, order)
-                logger.info(
-                    "  🔄 Repricing (Cancel/Replace): Limit Credit -> $%.2f",
-                    current_credit,
-                )
+                cancel_deadline = asyncio.get_running_loop().time() + 15
 
         except asyncio.CancelledError:
             logger.warning(
@@ -376,6 +423,57 @@ class IBKRPlacer:
             raise
         finally:
             self.ib.errorEvent -= _on_error
+
+    async def attach_take_profit(self, trade: Trade) -> str | None:
+        """Attach one GTC exit to a confirmed lot, reserving it before submission."""
+        if not self.attach_tp or not trade.contracts or trade.entry_credit <= 0:
+            return None
+        if trade.tp_order_id:
+            return trade.tp_order_id
+        session = object_session(trade)
+        if session is not None and (trade.status != TradeStatus.OPEN or not trade.execution_verified):
+            return None
+        account = broker_account(self.client)
+        if session is not None and not account:
+            raise RuntimeError("Cannot attach a TP without a broker account")
+        contract, is_combo, single_leg_action = await self._prepare_contract(trade)
+        tp_ref = f"TastyAgent_TP_{trade.id}"
+        ledger = Ledger(session) if session is not None else None
+        tp_intent = None
+        if ledger:
+            # Serialize protection against concurrent repair and management, rechecking
+            # lot size/status after the network await. Prepared intents survive a lost ACK.
+            session.execute(update(Trade).where(Trade.id == trade.id).values(status=Trade.status))
+            session.refresh(trade)
+            existing = session.scalar(
+                select(ExecutionOrder.id).where(
+                    ExecutionOrder.trade_id == trade.id,
+                    ExecutionOrder.terminal.is_(False),
+                ).limit(1)
+            )
+            if existing or trade.tp_order_id or trade.status != TradeStatus.OPEN or not trade.execution_verified:
+                session.commit()
+                return trade.tp_order_id
+            tp_intent = prepare_order(ledger, trade, "tp", account=account)
+            tp_ref = tp_intent.order_ref
+
+        credit = trade.entry_credit / (100 * trade.contracts)
+        target = credit * self.tp_pct
+        if trade.strike_width:
+            target = min(target, trade.strike_width * self.min_credit_width_ratio)
+        debit = max(0.01, round(credit - target, 2))
+        order = build_closing_tp_order(
+            contracts=trade.contracts, tp_debit_per_share=debit, account=account,
+            order_ref=tp_ref, transmit=True, is_combo=is_combo, single_leg_open_action=single_leg_action,
+        )
+        placed = self.ib.placeOrder(contract, order)
+        order_id = placed.order.orderId or order.orderId
+        trade.tp_order_id = str(order_id)
+        if ledger:
+            bind_order(ledger, tp_intent, order_id=order_id, perm_id=placed.order.permId,
+                       status=placed.orderStatus.status)
+        logger.info("Attached TP %s for trade %s at $%.2f debit", order_id, trade.id, debit)
+        return trade.tp_order_id
 
     async def open_candidate(self, candidate, contracts: int) -> str:
         """Open a position directly from CandidateTrade (used during rolling)."""

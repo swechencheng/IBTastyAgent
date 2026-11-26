@@ -8,25 +8,26 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, fields, replace
-from datetime import date, datetime
+from datetime import date
 import logging
 import os
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..config import TradingMode
-from ..db.models import Decision, EquitySnapshot, Trade, TradeEvent, TradeStatus
+from ..db.models import BrokerExecution, Decision, EquitySnapshot, ExecutionOrder, Trade, TradeEvent, TradeStatus
 from ..decision.context import DEFAULT_WATCHLIST
 from ..execution.executor import Executor
 from ..portfolio import benchmark as bench
 from ..portfolio.ledger import Ledger
 from ..portfolio.pnl import summarize
 from ..portfolio.watchlist import WatchlistRepo
+from ..risk.session import account_modes
 from ..scheduler import is_market_open
 from .runtime import Runtime
 from .schemas import (
@@ -94,6 +95,7 @@ def create_app(
     )
     app.state.session_factory = session_factory
     app.state.runtime = runtime
+    app.state.order_lock = asyncio.Lock()
     app.state.client = client
     app.state.metrics_session = metrics_session
     app.state.env_file = Path(env_file).resolve() if env_file else None
@@ -231,8 +233,6 @@ def create_app(
         # Calculate real-time combo metrics from broker portfolio items if all legs present
         live_cost_to_close = 0.0
         all_legs_in_port = bool(port_map) and bool(trade.legs)
-        live_unrealized_sum = 0.0
-        has_leg_unrealized = True
         has_leg_market_prices = True
 
         for leg in trade.legs or []:
@@ -248,13 +248,9 @@ def create_app(
             ):
                 mkt = float(p.marketPrice)
                 if "sell" in str(leg.action).lower():
-                    live_cost_to_close += mkt * 100.0 * contracts
+                    live_cost_to_close += mkt * 100.0 * leg.quantity
                 else:
-                    live_cost_to_close -= mkt * 100.0 * contracts
-                if getattr(p, "unrealizedPNL", None) is not None:
-                    live_unrealized_sum += float(p.unrealizedPNL)
-                else:
-                    has_leg_unrealized = False
+                    live_cost_to_close -= mkt * 100.0 * leg.quantity
             else:
                 all_legs_in_port = False
                 has_leg_market_prices = False
@@ -262,10 +258,7 @@ def create_app(
         if all_legs_in_port and has_leg_market_prices:
             combo_cost_to_close = max(0.0, round(live_cost_to_close, 2))
             combo_mkt_price = round(combo_cost_to_close / (100.0 * contracts), 2)
-            if has_leg_unrealized:
-                combo_unrealized = round(live_unrealized_sum, 2)
-            else:
-                combo_unrealized = round(trade.entry_credit - combo_cost_to_close, 2)
+            combo_unrealized = round(trade.entry_credit - combo_cost_to_close - (trade.entry_commission or 0), 2)
         else:
             combo_cost_to_close = trade.current_cost_to_close
             combo_mkt_price = (
@@ -303,9 +296,9 @@ def create_app(
 
             is_sell = "sell" in str(leg.action).lower()
             pos_size = (
-                -float(leg.quantity * contracts)
+                -float(leg.quantity)
                 if is_sell
-                else float(leg.quantity * contracts)
+                else float(leg.quantity)
             )
 
             occ = _format_occ_symbol(
@@ -333,38 +326,9 @@ def create_app(
                 local = getattr(getattr(p, "contract", None), "localSymbol", None)
                 if local:
                     occ = " ".join(local.split())
-                if getattr(p, "position", None) is not None:
-                    pos_size = float(p.position)
                 if getattr(p, "marketPrice", None) is not None:
                     mkt_price = round(float(p.marketPrice), 2)
-                if getattr(p, "averageCost", None) is not None and abs(pos_size) > 0:
-                    avg_price = round(float(p.averageCost) / 100.0, 2)
-                if getattr(p, "unrealizedPNL", None) is not None:
-                    leg_unrealized = round(float(p.unrealizedPNL), 2)
-
-                if leg_unrealized is None and mkt_price is not None and avg_price is not None:
-                    if is_sell:
-                        leg_unrealized = round((avg_price - mkt_price) * abs(pos_size) * 100.0, 2)
-                    else:
-                        leg_unrealized = round((mkt_price - avg_price) * abs(pos_size) * 100.0, 2)
-
-                if leg_unrealized is not None and avg_price and avg_price > 0:
-                    cost_basis = abs(pos_size) * avg_price * 100.0
-                    leg_pnl_pct = round((leg_unrealized / cost_basis) * 100.0, 2)
-                elif mkt_price is not None and avg_price and avg_price > 0:
-                    if is_sell:
-                        leg_pnl_pct = round(
-                            ((avg_price - mkt_price) / avg_price) * 100.0, 2
-                        )
-                    else:
-                        leg_pnl_pct = round(
-                            ((mkt_price - avg_price) / avg_price) * 100.0, 2
-                        )
-
-                if mkt_price is not None and avg_price and avg_price > 0:
-                    leg_change_pct = round(
-                        ((mkt_price - avg_price) / avg_price) * 100.0, 2
-                    )
+                # An account's aggregate basis and P/L can include unrelated strategies.
 
             net_delta += pos_size * leg_delta
 
@@ -386,6 +350,12 @@ def create_app(
             legs_out.append(LegOut(**leg_dict))
 
         trade_out = TradeOut.model_validate(trade)
+        from ..strategy.sizing import effective_buying_power
+
+        trade_out.buying_power = effective_buying_power(trade, app.state.runtime.strategy)
+        if trade.execution_verified is False:
+            trade_out.realized_pnl = None
+            trade_out.is_win = None
         trade_out.legs = legs_out
         trade_out.net_delta = round(net_delta, 2)
         trade_out.average_price = combo_avg_price
@@ -461,13 +431,15 @@ def create_app(
     def pnl(
         s: Session = Depends(get_session), rt: Runtime = Depends(get_runtime)
     ) -> PnLOut:
-        summary = summarize(Ledger(s).all_trades())
+        modes = account_modes(rt.mode)
+        summary = summarize(t for t in Ledger(s).all_trades() if t.mode in modes)
         return PnLOut(
             realized_pnl=summary.realized_pnl,
             unrealized_pnl=summary.unrealized_pnl,
             total_pnl=summary.total_pnl,
             open_count=summary.open_count,
             closed_count=summary.closed_count,
+            unverified_count=summary.unverified_count,
             wins=summary.wins,
             losses=summary.losses,
             win_rate=summary.win_rate,
@@ -616,6 +588,18 @@ def create_app(
         s: Session = Depends(get_session),
         rt: Runtime = Depends(get_runtime),
     ) -> ResetSandboxOut:
+        if rt.mode is not TradingMode.SANDBOX:
+            raise HTTPException(409, "Select sandbox mode before resetting its ledger")
+        if app.state.order_lock.locked():
+            raise HTTPException(409, "A trading cycle is in progress")
+        unresolved = s.scalar(
+            select(ExecutionOrder.id)
+            .join(Trade, Trade.id == ExecutionOrder.trade_id)
+            .where(Trade.mode == TradingMode.SANDBOX.value, ExecutionOrder.terminal.is_(False))
+            .limit(1)
+        )
+        if unresolved is not None:
+            raise HTTPException(409, "Resolve outstanding sandbox orders before resetting the ledger")
         logger = logging.getLogger("tastyagent.api")
         logger.info(
             "Executing Sandbox Reset: wiping sandbox trades, decisions, events, and canceling broker orders..."
@@ -647,6 +631,12 @@ def create_app(
         sandbox_trades = list(s.scalars(select(Trade).where(Trade.mode == "sandbox")))
         trades_count = len(sandbox_trades)
         sandbox_trade_ids = [t.id for t in sandbox_trades]
+        if sandbox_trade_ids:
+            sandbox_orders = select(ExecutionOrder.id).where(
+                ExecutionOrder.trade_id.in_(sandbox_trade_ids)
+            )
+            s.execute(delete(BrokerExecution).where(BrokerExecution.intent_id.in_(sandbox_orders)))
+            s.execute(delete(ExecutionOrder).where(ExecutionOrder.trade_id.in_(sandbox_trade_ids)))
         for t in sandbox_trades:
             s.delete(t)
 
@@ -715,17 +705,33 @@ def create_app(
         s: Session = Depends(get_session),
         rt: Runtime = Depends(get_runtime),
     ) -> ActionResult:
-        # Check live cushion guard before approving
-        if rt.mode.is_live and getattr(app.state, "client", None) is not None:
-            cash = await app.state.client.get_account_cash_summary()
-            min_cushion = getattr(rt.limits, "min_cushion_pct", 0.30)
-            if cash.cushion is not None and cash.cushion < min_cushion:
-                raise HTTPException(
-                    409,
-                    f"Cannot approve trade: IBKR account cushion ({cash.cushion:.1%}) is below the {min_cushion:.0%} minimum safety threshold.",
-                )
-        ex = Executor(Ledger(s), rt.mode, rt.placer)
-        out = await ex.approve(trade_id)
+        from ..risk.entry import check_order_entry
+        from ..runner import make_placer
+
+        async with app.state.order_lock:
+            ledger = Ledger(s)
+            trade = ledger.get(trade_id)
+            if trade is None or trade.status != TradeStatus.PENDING_APPROVAL or not rt.mode.is_live:
+                raise HTTPException(409, "Trade is not awaiting live approval")
+            client = app.state.client
+            capital = rt.starting_capital
+            cushion = None
+            if client is not None:
+                cash = await client.get_account_cash_summary()
+                if not rt.use_custom_working_capital:
+                    capital = cash.total_cash_usd
+                cushion = cash.cushion
+            def guard(t):
+                check_order_entry(ledger, t, rt, capital, cushion)
+            try:
+                guard(trade)
+            except ValueError as err:
+                raise HTTPException(409, str(err)) from err
+            placer = rt.placer
+            if placer is None and client is not None:
+                placer = make_placer(client, rt)
+                placer.entry_guard = guard
+            out = await Executor(ledger, rt.mode, placer).approve(trade_id)
         if out.action == "error":
             raise HTTPException(409, out.detail)
         return ActionResult(**out.__dict__)
@@ -750,12 +756,11 @@ def create_app(
         from ..runner import run_one_cycle
 
         try:
-            return await run_one_cycle(
-                client=app.state.client,
-                metrics_session=app.state.metrics_session,
-                session=s,
-                runtime=rt,
-            )
+            async with app.state.order_lock:
+                return await run_one_cycle(
+                    client=app.state.client, metrics_session=app.state.metrics_session,
+                    session=s, runtime=rt,
+                )
         finally:
             import time as time_mod
 
@@ -768,12 +773,11 @@ def create_app(
         try:
             from ..runner import run_one_cycle
 
-            await run_one_cycle(
-                client=app.state.client,
-                metrics_session=app.state.metrics_session,
-                session=sess,
-                runtime=app.state.runtime,
-            )
+            async with app.state.order_lock:
+                await run_one_cycle(
+                    client=app.state.client, metrics_session=app.state.metrics_session,
+                    session=sess, runtime=app.state.runtime,
+                )
         finally:
             import time as time_mod
 
@@ -791,7 +795,6 @@ def create_app(
         )
         from ..execution.tracker import sync_positions_and_marks
         from ..runner import _live_mark
-        from ..scheduler import is_market_open
 
         # Allow initial gateway connections to complete
         await asyncio.sleep(3.0)
@@ -856,30 +859,20 @@ def create_app(
         gen = get_session()
         try:
             s = next(gen)
-            from ..execution.tracker import (
-                reconcile_closing_orders,
-                reconcile_fills,
-                reconcile_positions_from_broker,
-                reconcile_stale_working_trades,
-            )
+            from ..execution.tracker import reconcile_stale_working_trades
+            from ..execution.reconciliation import broker_account, reconcile_broker_activity
 
             ledger = Ledger(s)
-            if broker_ok:
-                status_map = {
-                    str(t.order.orderId): t.orderStatus.status
-                    for t in ib_trades
-                    if getattr(t, "order", None) is not None
-                }
-                reconcile_fills(ledger, status_map)
-                reconcile_closing_orders(ledger, ib_trades, active_ib)
-                reconcile_positions_from_broker(ledger, positions)
-
+            account = broker_account(client) if broker_ok else None
+            if account:
+                reconcile_broker_activity(ledger, ib_trades, active_ib.fills(), account=account, mode=app.state.runtime.mode)
             canceled = reconcile_stale_working_trades(
                 ledger,
                 ib_trades=ib_trades,
                 positions=positions,
                 stale_after_seconds=0.0,
-            )
+                mode=app.state.runtime.mode,
+            ) if account else 0
             s.commit()
             if canceled:
                 logger.info(
@@ -1321,7 +1314,7 @@ def create_app(
             pop=t.probability_of_profit,
             status=t.status.value,
             detail=detail,
-            realized_pnl=t.realized_pnl,
+            realized_pnl=t.realized_pnl if t.execution_verified is not False else None,
         )
 
     @app.get("/api/activity", response_model=list[ActivityItem])
@@ -1338,7 +1331,11 @@ def create_app(
         closed: list[Trade] = list(
             s.scalars(
                 select(Trade)
-                .where(Trade.status == TradeStatus.CLOSED, Trade.closed_at.is_not(None))
+                .where(
+                    Trade.status == TradeStatus.CLOSED,
+                    Trade.closed_at.is_not(None),
+                    Trade.execution_verified.is_not(False),
+                )
                 .order_by(Trade.closed_at)
             )
         )
@@ -1511,4 +1508,10 @@ def _default_app() -> FastAPI:
     )
 
 
-app = _default_app()
+def __getattr__(name: str):
+    """Resolve uvicorn's app target lazily so importing the factory never opens the user DB."""
+    if name != "app":
+        raise AttributeError(name)
+    application = _default_app()
+    globals()["app"] = application
+    return application

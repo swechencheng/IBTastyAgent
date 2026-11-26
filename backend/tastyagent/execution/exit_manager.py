@@ -2,7 +2,7 @@
 
 Each tick, for every OPEN position we mark it (cost-to-close + current short-leg delta),
 ask ``strategy/exits.py`` what to do, and act:
-  - CLOSE -> place a closing order, book realized P/L
+  - CLOSE -> submit a closing order; the tracker books confirmed executions
   - ROLL  -> roll out (at manage_dte, default 14 DTE) or roll the untested side; falls back to CLOSE if no
              credit roll is available
 
@@ -22,8 +22,9 @@ logger = logging.getLogger(__name__)
 
 from ..config import StrategyParams
 from ..db.models import Trade, TradeStatus
-from ..models import CandidateTrade, OptionType, Strategy, OpenPosition
+from ..models import OptionType, Strategy, OpenPosition
 from ..portfolio.ledger import Ledger
+from .reconciliation import pending_order
 from ..strategy.exits import ExitAction, RollKind, evaluate_exit
 
 
@@ -36,17 +37,9 @@ class PositionMark:
     )
 
 
-@dataclass
-class RollResult:
-    new_candidate: CandidateTrade
-    contracts: int
-    exit_debit: float  # paid to close the old cycle
-    new_order_id: str
-
-
 MarkFn = Callable[[Trade], Awaitable[PositionMark]]
 CloseFn = Callable[[Trade, float], Awaitable[str]]  # (trade, debit_total) -> order id
-RollFn = Callable[[Trade, RollKind, PositionMark], Awaitable["RollResult | None"]]
+RollFn = Callable[[Trade, RollKind, PositionMark], Awaitable[str | None]]
 
 
 @dataclass
@@ -85,12 +78,19 @@ async def manage_exits(
     close_fn: CloseFn,
     roll_fn: RollFn | None = None,
     today: date | None = None,
+    eligible: Callable[[Trade], bool] | None = None,
 ) -> list[ExitOutcome]:
     today = today or date.today()
     outcomes: list[ExitOutcome] = []
 
     for trade in ledger.open_trades():
         if trade.status is not TradeStatus.OPEN:  # only manage filled positions
+            continue
+        if eligible is not None and not eligible(trade):
+            continue
+        pending = pending_order(ledger, trade.id)
+        if pending is not None:
+            outcomes.append(ExitOutcome(trade.id, trade.symbol, "pending", pending.reason, pending.order_ref))
             continue
         try:
             mark = await mark_fn(trade)
@@ -121,23 +121,7 @@ async def manage_exits(
                     )
                     continue
                 if roll is not None:
-                    new = ledger.record_roll(
-                        trade,
-                        roll.new_candidate,
-                        roll.contracts,
-                        roll.exit_debit,
-                        decision.reason,
-                        roll.new_order_id,
-                    )
-                    outcomes.append(
-                        ExitOutcome(
-                            trade.id,
-                            trade.symbol,
-                            "rolled",
-                            decision.reason,
-                            f"-> #{new.id}",
-                        )
-                    )
+                    outcomes.append(ExitOutcome(trade.id, trade.symbol, "submitted", decision.reason, roll))
                     continue
 
             # If rolling untested side (tested delta threshold reached) and no credit roll is available,
@@ -154,7 +138,7 @@ async def manage_exits(
                 continue
 
             # No credit roll available -> fall through to a plain close (e.g. manage_dte roll).
-            decision_reason = decision.reason + " (no credit roll; closed)"
+            decision_reason = decision.reason + " (no credit roll; close requested)"
         else:
             decision_reason = decision.reason
 
@@ -166,14 +150,7 @@ async def manage_exits(
                 ExitOutcome(trade.id, trade.symbol, "error", decision_reason, str(e))
             )
             continue
-        ledger.close_trade(
-            trade, exit_debit=mark.cost_to_close, exit_reason=decision_reason
-        )
-        outcomes.append(
-            ExitOutcome(
-                trade.id, trade.symbol, "closed", decision_reason, f"order {order_id}"
-            )
-        )
+        outcomes.append(ExitOutcome(trade.id, trade.symbol, "submitted", decision_reason, order_id))
 
     return outcomes
 
@@ -182,6 +159,7 @@ async def audit_take_profit_orders(
     ledger: Ledger,
     active_broker_order_ids: set[str],
     auto_attach_fn: Callable[[Trade], Awaitable[str]] | None = None,
+    *, eligible: Callable[[Trade], bool] | None = None,
 ) -> list[str]:
     """Audit open IBTastyAgent positions to ensure each has an active Take-Profit order on IBKR.
 
@@ -195,11 +173,13 @@ async def audit_take_profit_orders(
         if trade.status is not TradeStatus.OPEN:
             continue
 
+        if eligible is not None and not eligible(trade):
+            continue
         has_active_tp = (
             trade.tp_order_id and str(trade.tp_order_id) in active_broker_order_ids
         )
 
-        if not has_active_tp:
+        if not has_active_tp and pending_order(ledger, trade.id) is None:
             msg = (
                 f"⚠️ Position Alert: Trade #{trade.id} ({trade.symbol} {trade.strategy}, "
                 f"{trade.contracts}x) is OPEN in IBTastyAgent but has NO active Take-Profit order on IBKR!"
@@ -214,6 +194,8 @@ async def audit_take_profit_orders(
                         trade.id,
                     )
                     new_tp_id = await auto_attach_fn(trade)
+                    if not new_tp_id:
+                        continue
                     trade.tp_order_id = str(new_tp_id)
                     ledger.s.commit()
                     logger.info(

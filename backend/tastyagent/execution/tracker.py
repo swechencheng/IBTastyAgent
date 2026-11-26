@@ -12,7 +12,12 @@ from datetime import datetime, timezone
 import logging
 from typing import Any, Callable, Optional
 
-from ..db.models import EquitySnapshot, Trade, TradeStatus
+from sqlalchemy import select
+
+from ..config import TradingMode
+from ..risk.session import account_modes
+from ..db.models import EquitySnapshot, ExecutionOrder, Trade, TradeStatus
+from .reconciliation import broker_account, reconcile_broker_activity
 from ..portfolio.ledger import Ledger
 from ..portfolio.pnl import summarize
 
@@ -67,12 +72,20 @@ def reconcile_stale_working_trades(
     *,
     stale_after_seconds: float = 600.0,
     now: Optional[datetime] = None,
+    mode: TradingMode | None = None,
 ) -> int:
     """Cancel orphaned WORKING trades that never received a broker_order_id."""
     current_time = _as_utc(now) if now is not None else datetime.now(timezone.utc)
     canceled = 0
+    modes = account_modes(mode) if isinstance(mode, TradingMode) else None
     for trade in ledger.open_trades():
+        if modes is not None and trade.mode not in modes:
+            continue
         if trade.status != TradeStatus.WORKING or trade.broker_order_id:
+            continue
+        if ledger.s.scalar(select(ExecutionOrder.id).where(
+            ExecutionOrder.trade_id == trade.id, ExecutionOrder.terminal.is_(False)
+        ).limit(1)):
             continue
         if _has_matching_broker_order(trade, ib_trades):
             continue
@@ -107,187 +120,25 @@ DEAD = {
 
 
 def reconcile_fills(ledger: Ledger, order_status: dict[str, str]) -> None:
-    """Flip WORKING trades to OPEN (filled) or CANCELED (dead) per broker status."""
-    for trade in ledger.open_trades():
-        if trade.status is not TradeStatus.WORKING or not trade.broker_order_id:
-            continue
-        status = order_status.get(trade.broker_order_id)
-        if status in FILLED:
-            ledger.mark_open(trade)
-        elif status in DEAD:
-            ledger.cancel_trade(trade, reason=f"broker: {status}")
-
+    """Compatibility entry point: unscoped order IDs/statuses cannot settle an owned lot."""
+    return None
 
 def reconcile_closing_orders(
     ledger: Ledger,
     ib_trades: list[Any],
     active_ib: Any = None,
 ) -> int:
-    """Close OPEN trades in ledger if their closing orders have filled on the broker."""
-    closed_count = 0
-    trades_by_ref: dict[str, Any] = {}
-    trades_by_id: dict[str, Any] = {}
-    for t in ib_trades:
-        order = getattr(t, "order", None)
-        if order is not None:
-            ref = getattr(order, "orderRef", "")
-            if ref:
-                trades_by_ref[ref] = t
-            oid = getattr(order, "orderId", None)
-            if oid:
-                trades_by_id[str(oid)] = t
-
-    for trade in ledger.open_trades():
-        if trade.status is not TradeStatus.OPEN:
-            continue
-
-        close_ref = f"TastyAgent_CLOSE_{trade.id}"
-        tp_ref = f"TastyAgent_TP_{trade.id}"
-
-        close_trade = trades_by_ref.get(close_ref)
-        tp_trade = trades_by_ref.get(tp_ref) or (
-            trades_by_id.get(str(trade.tp_order_id)) if trade.tp_order_id else None
-        )
-
-        filled_trade = None
-        exit_reason = ""
-        is_tp = False
-
-        if (
-            close_trade
-            and getattr(getattr(close_trade, "orderStatus", None), "status", "")
-            in FILLED
-        ):
-            filled_trade = close_trade
-            exit_reason = "Closed via broker close order"
-        elif (
-            tp_trade
-            and getattr(getattr(tp_trade, "orderStatus", None), "status", "") in FILLED
-        ):
-            filled_trade = tp_trade
-            exit_reason = "Take-profit order filled"
-            is_tp = True
-
-        if filled_trade is not None:
-            exit_debit = 0.0
-            closed_at = None
-            fills = getattr(filled_trade, "fills", [])
-            bag_fill = next(
-                (
-                    f
-                    for f in fills
-                    if getattr(getattr(f, "contract", None), "secType", "") == "BAG"
-                ),
-                None,
-            )
-            if bag_fill is not None:
-                p = getattr(getattr(bag_fill, "execution", None), "price", 0.0)
-                exit_debit = abs(float(p)) * 100.0 * trade.contracts
-                closed_at = getattr(getattr(bag_fill, "execution", None), "time", None)
-            elif fills:
-                leg_debit = 0.0
-                for f in fills:
-                    price = float(getattr(getattr(f, "execution", None), "price", 0.0))
-                    side = (
-                        str(getattr(getattr(f, "execution", None), "side", ""))
-                        .strip()
-                        .upper()
-                    )
-                    if side == "BOT":
-                        leg_debit += price
-                    else:
-                        leg_debit -= price
-                    if closed_at is None:
-                        closed_at = getattr(
-                            getattr(f, "execution", None), "time", None
-                        )
-                exit_debit = abs(leg_debit) * 100.0 * trade.contracts
-            else:
-                exit_debit = (
-                    trade.take_profit_debit
-                    if is_tp and trade.take_profit_debit is not None
-                    else (trade.current_cost_to_close or trade.entry_credit)
-                )
-
-            # Cancel remaining TP order if this was a manual/defensive close
-            if not is_tp and trade.tp_order_id and active_ib is not None:
-                try:
-                    for ot in active_ib.openTrades():
-                        if str(ot.order.orderId) == str(
-                            trade.tp_order_id
-                        ) or getattr(ot.order, "orderRef", "") == tp_ref:
-                            active_ib.cancelOrder(ot.order)
-                            logger.info(
-                                "Cancelled orphaned TP order #%s for closed Trade #%s",
-                                trade.tp_order_id,
-                                trade.id,
-                            )
-                except Exception as e:
-                    logger.debug("Failed to cancel TP order: %s", e)
-
-            ledger.close_trade(
-                trade,
-                exit_debit=exit_debit,
-                exit_reason=exit_reason,
-                closed_at=closed_at,
-            )
-            closed_count += 1
-            logger.info(
-                "Trade #%s (%s %s) reconciled as CLOSED (%s, debit: $%.2f)",
-                trade.id,
-                trade.symbol,
-                trade.strategy,
-                exit_reason,
-                exit_debit,
-            )
-
-    return closed_count
+    """Legacy sync adapter. Only owned execution reports may close a ledger lot."""
+    accounts = active_ib.managedAccounts() if active_ib and hasattr(active_ib, "managedAccounts") else []
+    if len(accounts) != 1:
+        return 0
+    fills = active_ib.fills() if hasattr(active_ib, "fills") else []
+    return reconcile_broker_activity(ledger, ib_trades, fills, account=accounts[0])
 
 
 def reconcile_positions_from_broker(ledger: Ledger, positions: list[Any]) -> int:
-    """Transition WORKING trades to OPEN if all their option legs exist in broker positions.
-
-    Useful when order fills happened across session restarts or when order-id lookups expire.
-    """
-    if not positions:
-        return 0
-
-    pos_keys = set()
-    for p in positions:
-        c = getattr(p, "contract", None)
-        if c is not None:
-            sym = getattr(c, "symbol", "").upper()
-            right = getattr(c, "right", "").upper()
-            strike = round(float(getattr(c, "strike", 0.0)), 2)
-            exp = str(getattr(c, "lastTradeDateOrContractMonth", "") or "").replace(
-                "-", ""
-            )
-            pos_keys.add((sym, right, strike, exp))
-
-    transitioned = 0
-    for trade in ledger.open_trades():
-        if trade.status is not TradeStatus.WORKING or not trade.legs:
-            continue
-        all_legs_in_pos = True
-        for leg in trade.legs:
-            right = "P" if leg.option_type.lower() == "put" else "C"
-            strike = round(float(leg.strike), 2)
-            exp = str(leg.expiration).replace("-", "")
-            key = (trade.symbol.upper(), right, strike, exp)
-            if key not in pos_keys:
-                all_legs_in_pos = False
-                break
-        if all_legs_in_pos:
-            ledger.mark_open(trade)
-            transitioned += 1
-            logger.info(
-                "Trade #%s (%s %s) verified in broker positions -> status transitioned to OPEN",
-                trade.id,
-                trade.symbol,
-                trade.strategy,
-            )
-
-    return transitioned
+    """Account-level positions do not establish ownership of a strategy execution."""
+    return 0
 
 
 def calculate_marks_from_portfolio(
@@ -329,9 +180,9 @@ def calculate_marks_from_portfolio(
             if p is not None and getattr(p, "marketPrice", None) is not None:
                 mkt_price = float(p.marketPrice)
                 if "sell" in str(leg.action).lower():
-                    cost_to_close += mkt_price * 100 * trade.contracts
+                    cost_to_close += mkt_price * 100 * leg.quantity
                 else:
-                    cost_to_close -= mkt_price * 100 * trade.contracts
+                    cost_to_close -= mkt_price * 100 * leg.quantity
             else:
                 all_legs_found = False
                 break
@@ -357,15 +208,6 @@ async def sync_positions_and_marks(
 ) -> dict[str, Any]:
     """Reconcile broker fills, update position marks, and persist an equity snapshot."""
     ledger = Ledger(session)
-    open_trades = ledger.open_trades()
-    if not open_trades:
-        return {
-            "reconciled": 0,
-            "marks_updated": 0,
-            "unrealized_pnl": 0.0,
-            "realized_pnl": 0.0,
-        }
-
     active_ib = getattr(client, "active_trading_ib", None)
     if active_ib is None or not active_ib.isConnected():
         return {"reconciled": 0, "marks_updated": 0, "error": "IBKR not connected"}
@@ -374,22 +216,31 @@ async def sync_positions_and_marks(
     positions: list[Any] = []
     positions_ok = False
 
-    # 1. Reconcile fills from active trades & order statuses
+    # Reconcile even on a flat ledger: fees and historical executions can arrive late.
+    account = broker_account(client)
     try:
         ib_trades = active_ib.trades()
-        status_map = {str(t.order.orderId): t.orderStatus.status for t in ib_trades}
-        reconcile_fills(ledger, status_map)
-        reconcile_closing_orders(ledger, ib_trades, active_ib)
-    except Exception as e:
-        logger.debug("reconcile_fills / reconcile_closing_orders failed: %s", e)
+        fills = active_ib.fills() if hasattr(active_ib, "fills") else []
+        try:
+            if account and hasattr(active_ib, "reqExecutionsAsync"):
+                from ib_async import ExecutionFilter
 
-    # 2. Reconcile working trades against current positions
+                fills = list(fills) + list(await active_ib.reqExecutionsAsync(
+                    ExecutionFilter(acctCode=account)
+                ))
+        except Exception:
+            logger.warning("Execution history unavailable; replaying cached executions", exc_info=True)
+        reconciled = reconcile_broker_activity(ledger, ib_trades, fills, account=account, mode=getattr(runtime,"mode",None))
+    except Exception:
+        logger.exception("Execution reconciliation failed; retaining pending orders")
+        session.rollback()
+        reconciled = 0
+
     try:
         positions = active_ib.positions()
         positions_ok = True
-        reconcile_positions_from_broker(ledger, positions)
     except Exception as e:
-        logger.debug("reconcile_positions_from_broker failed: %s", e)
+        logger.debug("Reading account positions failed: %s", e)
 
     # 2b. Cancel orphaned WORKING trades stuck without broker_order_id
     if positions_ok:
@@ -399,19 +250,17 @@ async def sync_positions_and_marks(
                 ib_trades=ib_trades,
                 positions=positions,
                 stale_after_seconds=600.0,
+                mode=getattr(runtime, "mode", None),
             )
         except Exception as e:
             logger.debug("reconcile_stale_working_trades failed: %s", e)
 
     # 3. Calculate marks from broker portfolio
-    combined_portfolio = list(active_ib.portfolio()) if active_ib else []
-    if (
-        client
-        and hasattr(client, "data_ib")
-        and client.data_ib
-        and client.data_ib.isConnected()
-    ):
-        combined_portfolio.extend(client.data_ib.portfolio())
+    open_trades = [t for t in ledger.open_trades() if t.status is TradeStatus.OPEN]
+    combined_portfolio = [
+        item for item in active_ib.portfolio()
+        if not account or getattr(item, "account", account) == account
+    ]
 
     marks: dict[int, float] = {}
     try:
@@ -439,8 +288,13 @@ async def sync_positions_and_marks(
                     )
 
     # 5. Persist equity snapshot so frontend equity curve is up to date
-    summary = summarize(ledger.all_trades())
-    if runtime is not None:
+    mode = getattr(runtime,"mode",None)
+    trades = ledger.all_trades()
+    if isinstance(mode,TradingMode):
+        modes = account_modes(mode)
+        trades = [trade for trade in trades if trade.mode in modes]
+    summary = summarize(trades)
+    if runtime is not None and not summary.unverified_count:
         import asyncio
         from sqlalchemy import select
         from ..portfolio.benchmark import latest_sp500_close
@@ -481,7 +335,7 @@ async def sync_positions_and_marks(
         summary.realized_pnl,
     )
     return {
-        "reconciled": len(open_trades),
+        "reconciled": reconciled,
         "marks_updated": len(marks),
         "unrealized_pnl": summary.unrealized_pnl,
         "realized_pnl": summary.realized_pnl,

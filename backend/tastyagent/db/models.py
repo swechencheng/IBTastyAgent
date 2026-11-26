@@ -10,6 +10,9 @@ from datetime import date, datetime, timezone
 from enum import Enum
 
 from sqlalchemy import (
+    Boolean,
+    JSON,
+    UniqueConstraint,
     DateTime,
     Enum as SAEnum,
     Float,
@@ -80,6 +83,12 @@ class Trade(Base):
     exit_reason: Mapped[str | None] = mapped_column(String(64), default=None)
     realized_pnl: Mapped[float | None] = mapped_column(Float, default=None)
 
+    execution_verified: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    entry_commission: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    commission: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    basis_parent_id: Mapped[int | None] = mapped_column(Integer, default=None)
+    basis_transferred: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+
     broker_order_id: Mapped[str | None] = mapped_column(String(64), default=None)
     tp_order_id: Mapped[str | None] = mapped_column(String(64), default=None)
     order_ref: Mapped[str | None] = mapped_column(String(64), default=None)
@@ -107,7 +116,7 @@ class Trade(Base):
         """Credit kept so far if we closed at the current mark."""
         if not self.is_open:
             return 0.0
-        return self.entry_credit - self.current_cost_to_close
+        return self.entry_credit - self.current_cost_to_close - (self.entry_commission or 0.0)
 
     @property
     def is_win(self) -> bool | None:
@@ -209,3 +218,45 @@ class EquitySnapshot(Base):
     realized_pnl_cum: Mapped[float] = mapped_column(Float, default=0.0)
     unrealized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
     sp500_close: Mapped[float | None] = mapped_column(Float, default=None)
+
+
+class ExecutionOrder(Base):
+    """Durable pre-submission intent. A non-null management slot excludes a second exit."""
+
+    __tablename__ = "execution_orders"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    trade_id: Mapped[int] = mapped_column(ForeignKey("trades.id"), index=True)
+    order_ref: Mapped[str] = mapped_column(String(64), unique=True)
+    account: Mapped[str] = mapped_column(String(64))
+    kind: Mapped[str] = mapped_column(String(10))
+    reason: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(32), default="Prepared")
+    order_id: Mapped[str | None] = mapped_column(String(64))
+    perm_id: Mapped[str | None] = mapped_column(String(64))
+    management_slot: Mapped[int | None] = mapped_column(Integer, unique=True)
+    requested: Mapped[int] = mapped_column(Integer)
+    applied: Mapped[int] = mapped_column(Integer, default=0)
+    applied_cash: Mapped[float] = mapped_column(Float, default=0)
+    applied_fees: Mapped[float] = mapped_column(Float, default=0)
+    spec: Mapped[dict] = mapped_column(JSON)
+    allocations: Mapped[list] = mapped_column(JSON, default=list)
+    terminal: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class BrokerExecution(Base):
+    """One IB execution per account+execId, including its asynchronous commission."""
+
+    __tablename__ = "broker_executions"
+    __table_args__ = (UniqueConstraint("account", "exec_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    intent_id: Mapped[int] = mapped_column(ForeignKey("execution_orders.id"), index=True)
+    account: Mapped[str] = mapped_column(String(64))
+    exec_id: Mapped[str] = mapped_column(String(96))
+    leg: Mapped[str] = mapped_column(String(128))
+    quantity: Mapped[int] = mapped_column(Integer)
+    cash: Mapped[float] = mapped_column(Float)
+    fee: Mapped[float | None] = mapped_column(Float)
+    ts: Mapped[datetime] = mapped_column(DateTime)

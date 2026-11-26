@@ -235,7 +235,7 @@ export default function Positions() {
                                                     ? leg.position_size > 0
                                                       ? `+${leg.position_size}`
                                                       : leg.position_size
-                                                    : `${isShort ? "-" : "+"}${leg.quantity * t.contracts}`}
+                                                    : `${isShort ? "-" : "+"}${leg.quantity}`}
                                                 </TableCell>
                                                 <TableCell className={cn("py-2.5 text-right", num)}>
                                                   {fmtPrice(leg.average_price)}
@@ -357,9 +357,9 @@ export default function Positions() {
                             <TableCell className="font-semibold">{t.symbol}</TableCell>
                             <TableCell className="text-muted-foreground">{t.strategy}</TableCell>
                             <TableCell className={cn("text-right", num)}>{pop(t.probability_of_profit)}</TableCell>
-                            <TableCell className={cn("text-right", num, t.is_win ? "text-gain" : "text-loss")}>{fmtMoneySigned(t.realized_pnl ?? 0)}</TableCell>
-                            <TableCell><ProfitBar pct={taken} /></TableCell>
-                            <TableCell><Badge variant={t.is_win ? "gain" : "loss"}>{t.is_win ? "WIN" : "LOSS"}</Badge></TableCell>
+                            <TableCell className={cn("text-right", num, t.is_win ? "text-gain" : "text-loss")}>{fmtMoneySigned(t.realized_pnl)}</TableCell>
+                            <TableCell>{t.realized_pnl == null || t.basis_transferred ? "—" : <ProfitBar pct={taken} />}</TableCell>
+                            <TableCell>{t.execution_verified === false ? "Awaiting fills" : t.basis_transferred ? "Rolled" : <Badge variant={t.is_win ? "gain" : "loss"}>{t.is_win ? "WIN" : "LOSS"}</Badge>}</TableCell>
                             <TableCell className="text-xs text-muted-foreground">{t.exit_reason || "—"}</TableCell>
                             <TableCell>{expanded === t.id ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />}</TableCell>
                           </TableRow>

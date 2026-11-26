@@ -62,7 +62,7 @@ class FakeClient:
         self.data_ib = data_ib or active_ib
 
 
-def test_reconcile_positions_from_broker():
+def test_account_positions_alone_do_not_promote_an_owned_trade():
     s = in_memory_session()
     lg = Ledger(s)
     c = make_candidate(symbol="SPY", max_profit=200.0)
@@ -95,8 +95,8 @@ def test_reconcile_positions_from_broker():
     ]
 
     transitioned = reconcile_positions_from_broker(lg, positions)
-    assert transitioned == 1
-    assert t.status is TradeStatus.OPEN
+    assert transitioned == 0
+    assert t.status is TradeStatus.WORKING
 
 
 def test_calculate_marks_from_portfolio():
@@ -134,6 +134,7 @@ async def test_sync_positions_and_marks():
     c = make_candidate(symbol="NVDA", max_profit=250.0)
     t = lg.record_planned(c, 1, "test sync", TradingMode.SANDBOX)
 
+    lg.mark_open(t)
     leg1, leg2 = t.legs[0], t.legs[1]
     pos = [
         FakePosition(
@@ -161,7 +162,7 @@ async def test_sync_positions_and_marks():
     res = await sync_positions_and_marks(
         client=client, session=s, runtime=FakeRuntime()
     )
-    assert res["reconciled"] == 1
+    assert res["reconciled"] == 0
     assert res["marks_updated"] == 1
     # Cost to close = (1.00 + 0.50) * 100 = 150.0
     assert t.current_cost_to_close == 150.0
@@ -210,7 +211,7 @@ class FakeIBTrade:
             self.fills = []
 
 
-def test_reconcile_closing_orders_manual_close():
+def test_close_without_owned_execution_id_is_not_booked():
     from tastyagent.execution.tracker import reconcile_closing_orders
 
     s = in_memory_session()
@@ -239,14 +240,12 @@ def test_reconcile_closing_orders_manual_close():
     fake_trade.fills[0].contract.secType = "BAG"
 
     reconciled = reconcile_closing_orders(lg, [fake_trade])
-    assert reconciled == 1
-    assert t.status is TradeStatus.CLOSED
-    assert t.exit_debit == 88.0
-    assert t.realized_pnl == 59.0 - 88.0  # -29.0
-    assert "broker close order" in t.exit_reason
+    assert reconciled == 0
+    assert t.status is TradeStatus.OPEN
+    assert t.exit_debit is None
 
 
-def test_reconcile_closing_orders_tp_fill():
+def test_tp_status_without_execution_does_not_book_a_limit_price():
     from tastyagent.execution.tracker import reconcile_closing_orders
 
     s = in_memory_session()
@@ -265,11 +264,9 @@ def test_reconcile_closing_orders_tp_fill():
     )
 
     reconciled = reconcile_closing_orders(lg, [fake_tp])
-    assert reconciled == 1
-    assert t.status is TradeStatus.CLOSED
-    assert t.exit_debit == 100.0
-    assert t.realized_pnl == 100.0
-    assert "Take-profit order filled" in t.exit_reason
+    assert reconciled == 0
+    assert t.status is TradeStatus.OPEN
+    assert t.realized_pnl is None
 
 
 from datetime import datetime as _datetime, timedelta as _timedelta, timezone as _timezone
