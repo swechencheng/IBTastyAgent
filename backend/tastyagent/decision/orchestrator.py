@@ -125,7 +125,7 @@ def _evaluate_candidate(
     Returns `(contracts, failure_stage, reason)` where `failure_stage` is one of
     `"vix"`, `"guardrail"`, `"sizing"`, `"risk"`, or `None` when feasible.
     """
-    vix_rejection = iron_condor_vix_rejection(cand.strategy, vix)
+    vix_rejection = iron_condor_vix_rejection(cand.strategy, vix, params)
     if vix_rejection is not None:
         return 0, "vix", vix_rejection
 

@@ -257,15 +257,21 @@ def test_approval_rechecks_vix_for_a_previously_queued_iron_condor(monkeypatch):
     broker = SimpleNamespace(
         data_ib=data_session,
         active_trading_ib=None,
+        cached_cash_summary=lambda: None,
         get_account_cash_summary=AsyncMock(
             return_value=SimpleNamespace(cushion=0.80)
         ),
     )
-    read_vix = AsyncMock(side_effect=[25.001, 25.0])
+    read_vix = AsyncMock(side_effect=[30.251, 30.25])
     monkeypatch.setattr("tastyagent.ibkr.marketdata.get_vix_level", read_vix)
     client = TestClient(
         create_app(sf, Runtime(mode=TradingMode.LIVE_APPROVAL, placer=placer), client=broker)
     )
+
+    settings = client.put(
+        "/api/settings", json={"strategy": {"max_iron_condor_entry_vix": 30.25}}
+    )
+    assert settings.status_code == 200
 
     blocked = client.post(f"/api/approvals/{trade_id}/approve")
     assert blocked.status_code == 409

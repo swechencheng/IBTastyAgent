@@ -726,7 +726,7 @@ def create_app(
                 cushion = cash.cushion
                 if trade.strategy == Strategy.IRON_CONDOR:
                     vix = await get_vix_level(client.data_ib or client.active_trading_ib)
-                    rejection = iron_condor_vix_rejection(trade.strategy, vix)
+                    rejection = iron_condor_vix_rejection(trade.strategy, vix, rt.strategy)
                     if rejection is not None:
                         raise HTTPException(409, rejection)
 
@@ -1257,7 +1257,7 @@ def create_app(
         if req.strategy:
             try:
                 rt.strategy = _apply_updates(rt.strategy, req.strategy)
-            except ValueError as e:
+            except (TypeError, ValueError) as e:
                 raise HTTPException(400, str(e)) from e
         if req.risk:
             rt.risk = _apply_updates(

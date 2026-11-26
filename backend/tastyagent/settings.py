@@ -41,6 +41,7 @@ class _StrategyEnv(BaseSettings):
     earnings_blackout_days: int | None = None
     enforce_min_vix: bool | None = None
     min_vix: float | None = None
+    max_iron_condor_entry_vix: float | None = None
     universe_top_n: int | None = None
     take_profit_pct: float | None = None
     manage_dte: int | None = None

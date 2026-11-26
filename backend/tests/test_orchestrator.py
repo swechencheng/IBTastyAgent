@@ -317,6 +317,35 @@ async def test_vix_at_or_below_25_allows_iron_condor(vix):
     assert [plan.candidate for plan in result.planned] == [condor]
 
 
+@pytest.mark.parametrize(
+    ("limit", "vix", "eligible"),
+    [(20.5, 20.501, False), (30.5, 30.5, True)],
+)
+async def test_configured_iron_condor_vix_limit_is_used(limit, vix, eligible):
+    params = replace(PARAMS, max_iron_condor_entry_vix=limit)
+    condor = make_iron_condor()
+    selector = AsyncMock(side_effect=selector_picking([(0, 1)]))
+
+    result = await run_cycle(
+        [condor],
+        portfolio(),
+        build_regime({}, params, vix),
+        params,
+        LIMITS,
+        selector=selector,
+    )
+
+    if eligible:
+        selector.assert_awaited_once()
+        assert [plan.candidate for plan in result.planned] == [condor]
+    else:
+        selector.assert_not_awaited()
+        assert result.planned == []
+        rejected, reason = result.rejected[0]
+        assert rejected == condor
+        assert str(limit) in reason
+
+
 async def test_high_vix_skips_llm_if_only_condors_are_available():
     condor = make_iron_condor()
     selector = AsyncMock()

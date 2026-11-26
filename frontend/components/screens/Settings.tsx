@@ -56,6 +56,7 @@ type Form = {
   earningsBlackoutDays: number;
   enforceMinVix: boolean;
   minVix: number;
+  maxIronCondorEntryVix: number;
 
   // --- Management ---
   takeProfit: number;
@@ -140,6 +141,7 @@ function fromSettings(sData: SettingsT): Form {
     earningsBlackoutDays: n(st.earnings_blackout_days, 7),
     enforceMinVix: st.enforce_min_vix !== undefined ? !!st.enforce_min_vix : true,
     minVix: n(st.min_vix, 15),
+    maxIronCondorEntryVix: n(st.max_iron_condor_entry_vix, 25),
 
     takeProfit: Math.round(n(st.take_profit_pct, 0.5) * 100),
     manageDte: n(st.manage_dte, 14),
@@ -209,6 +211,7 @@ function toPayload(f: Form): SettingsUpdate {
       earnings_blackout_days: f.earningsBlackoutDays,
       enforce_min_vix: f.enforceMinVix,
       min_vix: f.minVix,
+      max_iron_condor_entry_vix: f.maxIronCondorEntryVix,
       take_profit_pct: f.takeProfit / 100,
       manage_dte: f.manageDte,
       use_hard_stop: f.hardStop,
@@ -319,18 +322,24 @@ function NInput({
   onChange,
   disabled = false,
   step = 1,
+  min,
+  ariaLabel,
   w = 88,
 }: {
   value: number;
   onChange: (v: number) => void;
   disabled?: boolean;
-  step?: number;
+  step?: number | "any";
+  min?: number;
+  ariaLabel?: string;
   w?: number;
 }) {
   return (
     <Input
       type="number"
       step={step}
+      min={min}
+      aria-label={ariaLabel}
       value={Number.isFinite(value) ? value : 0}
       onChange={(e) => onChange(Number(e.target.value))}
       disabled={disabled}
@@ -428,6 +437,9 @@ export default function Settings({
   const validationError = (() => {
     if (!form) return null;
     if (form.working_capital <= 0) return "Working capital must be greater than 0";
+    if (!Number.isFinite(form.maxIronCondorEntryVix) || form.maxIronCondorEntryVix < 0) {
+      return "Max VIX for iron condor entries must be a finite number of 0 or higher.";
+    }
     if (form.shortDelta <= 0) return "Target short delta must be greater than 0";
     if (form.shortDelta > form.maxShortDelta) {
       return `Target short delta (${form.shortDelta}Δ) cannot exceed Max short leg delta (${form.maxShortDelta}Δ)`;
@@ -751,10 +763,25 @@ export default function Settings({
                 derived={
                   form.enforceMinVix
                     ? `Halts new entries whenever VIX < ${form.minVix}`
-                    : "VIX entry filter disabled — new entries allowed at any VIX"
+                    : "Minimum VIX filter disabled"
                 }
               >
                 <NInput value={form.minVix} onChange={(v) => set("minVix", v)} step={0.5} />
+              </Field>
+
+              <Field
+                label="Max VIX for iron condor entries"
+                help="Default 25. The agent excludes new iron condors from LLM evaluation when CBOE VIX is above this value."
+                unit="VIX"
+                derived={`Blocks new iron condors when VIX > ${form.maxIronCondorEntryVix}`}
+              >
+                <NInput
+                  ariaLabel="Max VIX for iron condor entries"
+                  value={form.maxIronCondorEntryVix}
+                  onChange={(v) => set("maxIronCondorEntryVix", v)}
+                  min={0}
+                  step="any"
+                />
               </Field>
             </CardContent>
           </Card>

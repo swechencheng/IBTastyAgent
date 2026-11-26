@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from math import isfinite
 
 
 class TradingMode(str, Enum):
@@ -63,6 +64,7 @@ class StrategyParams:
     earnings_blackout_days: int = 7  # avoid opening within N days of earnings
     enforce_min_vix: bool = True  # skip opening new positions when VIX < min_vix
     min_vix: float = 15.0  # minimum VIX level required to open new short premium positions
+    max_iron_condor_entry_vix: float = 25.0  # block new iron condors above this VIX
     universe_top_n: int = 25  # scan top-N highest-IVR names so affordable ETFs are not starved
 
     # --- Exit / management ---
@@ -77,6 +79,11 @@ class StrategyParams:
     def __post_init__(self):
         if self.min_vix < 0:
             raise ValueError(f"min_vix ({self.min_vix}) cannot be negative")
+        if (
+            not isfinite(self.max_iron_condor_entry_vix)
+            or self.max_iron_condor_entry_vix < 0
+        ):
+            raise ValueError("max_iron_condor_entry_vix must be finite and nonnegative")
         if self.min_credit_width_ratio <= 0:
             raise ValueError(
                 f"min_credit_width_ratio ({self.min_credit_width_ratio}) must be strictly positive"

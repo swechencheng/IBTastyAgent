@@ -1,4 +1,6 @@
 from unittest.mock import MagicMock
+
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -34,6 +36,7 @@ def test_settings_get_shape():
     assert j["working_capital"] == 10000.0
     assert j["use_custom_working_capital"] is True
     assert "min_iv_rank" in j["strategy"] and "universe_top_n" in j["strategy"]
+    assert j["strategy"]["max_iron_condor_entry_vix"] == 25.0
     assert "max_trade_bp_pct" in j["risk"]
     assert "kill_switch" not in j["risk"]  # kill switch is its own toggle
     assert j["scheduler"]["market_hours_only"] is True
@@ -113,6 +116,41 @@ def test_settings_put_partial_update():
 
 def test_settings_put_rejects_bad_capital():
     assert client().put("/api/settings", json={"working_capital": 0}).status_code == 400
+
+
+def test_iron_condor_vix_limit_is_persisted_and_reloaded(tmp_path, monkeypatch):
+    from tastyagent.settings import load_settings
+
+    env_key = "TASTYAGENT_MAX_IRON_CONDOR_ENTRY_VIX"
+    monkeypatch.setenv(env_key, "25")
+    monkeypatch.chdir(tmp_path)
+    env_file = tmp_path / ".env"
+    app = create_app(factory(), Runtime(mode=TradingMode.SANDBOX), env_file=env_file)
+    c = TestClient(app)
+
+    updated = c.put(
+        "/api/settings", json={"strategy": {"max_iron_condor_entry_vix": 28.75}}
+    )
+    assert updated.status_code == 200
+    assert updated.json()["strategy"]["max_iron_condor_entry_vix"] == 28.75
+    assert c.get("/api/settings").json()["strategy"]["max_iron_condor_entry_vix"] == 28.75
+    assert f"{env_key}=28.75" in env_file.read_text()
+
+    # Exercise the persisted file even though PUT also updates the process env.
+    monkeypatch.delenv(env_key)
+    assert load_settings().strategy_params().max_iron_condor_entry_vix == 28.75
+
+
+@pytest.mark.parametrize("invalid", [-1, "nan", "inf"])
+def test_settings_reject_invalid_iron_condor_vix_limit(invalid):
+    c = client()
+
+    response = c.put(
+        "/api/settings", json={"strategy": {"max_iron_condor_entry_vix": invalid}}
+    )
+
+    assert response.status_code == 400
+    assert c.get("/api/settings").json()["strategy"]["max_iron_condor_entry_vix"] == 25.0
 
 
 def test_activity_feed():
