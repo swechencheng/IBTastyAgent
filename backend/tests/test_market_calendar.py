@@ -63,6 +63,33 @@ def test_days_the_calendar_does_not_cover_use_regular_hours():
     assert not is_market_open(datetime(2026, 6, 1, 16, 30, tzinfo=ET))
 
 
+REGULAR = (time(9, 30), time(16, 0))
+EARLY = (time(9, 30), time(13, 0))
+
+
+@pytest.mark.parametrize(
+    ("day", "hours"),
+    [
+        (date(2026, 11, 26), None),  # Thanksgiving
+        (date(2026, 11, 27), EARLY),  # day after Thanksgiving
+        (date(2026, 12, 24), EARLY),  # Christmas Eve on a Thursday
+        (date(2026, 12, 25), None),  # Christmas
+        (date(2026, 4, 3), None),  # Good Friday
+        (date(2026, 1, 19), None),  # Martin Luther King Jr. Day
+        (date(2026, 7, 3), None),  # Independence Day observed on Friday
+        (date(2026, 7, 2), REGULAR),  # no early close before an observed Friday
+        (date(2025, 7, 3), EARLY),  # early close before a Friday July 4
+        (date(2027, 7, 5), None),  # July 4 on a Sunday, observed Monday
+        (date(2027, 6, 18), None),  # Juneteenth on a Saturday, observed Friday
+        (date(2021, 12, 31), REGULAR),  # New Year's Day on a Saturday is not observed
+        (date(2026, 6, 1), REGULAR),  # an ordinary Monday
+        (date(2026, 11, 28), None),  # Saturday
+    ],
+)
+def test_exchange_calendar_fallback(day, hours):
+    assert market_calendar.nyse_hours(day) == hours
+
+
 async def test_ensure_loaded_reads_spy_hours_once_per_day():
     market_calendar.clear()
     ib = MagicMock()
@@ -78,7 +105,7 @@ async def test_ensure_loaded_reads_spy_hours_once_per_day():
     assert not is_market_open(datetime(2026, 11, 27, 13, 1, tzinfo=ET))
 
 
-async def test_ensure_loaded_keeps_regular_hours_when_ib_fails():
+async def test_falls_back_to_the_exchange_calendar_when_ib_fails():
     market_calendar.clear()
     ib = MagicMock()
     ib.reqContractDetailsAsync = AsyncMock(side_effect=ConnectionError("down"))
@@ -86,4 +113,5 @@ async def test_ensure_loaded_keeps_regular_hours_when_ib_fails():
     loaded = await market_calendar.ensure_loaded(ib, today=date(2026, 11, 27))
 
     assert not loaded
-    assert is_market_open(datetime(2026, 11, 27, 13, 1, tzinfo=ET))
+    assert is_market_open(datetime(2026, 11, 27, 12, 59, tzinfo=ET))
+    assert not is_market_open(datetime(2026, 11, 27, 13, 1, tzinfo=ET))

@@ -30,6 +30,7 @@ from ..execution.reconciliation import (
 )
 from ..models import Strategy
 from ..portfolio.ledger import Ledger
+from ..scheduler import is_market_open
 from ..strategy.guardrails import entry_width_ratio
 from ..strategy.sizing import minimum_entry_credit
 from .client import IBKRClient
@@ -244,6 +245,8 @@ class IBKRPlacer:
 
         def submit(credit: float, *, replacement: bool = False):
             nonlocal order_ref, intent
+            if replacement and not is_market_open():
+                raise EntryUnfilledError("Market closed during the entry walk")
             if ledger:
                 # Serialize the risk read and preparation across simultaneous entry
                 # requests. Preserve a submitted intent even if its ACK was lost.

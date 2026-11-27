@@ -211,6 +211,17 @@ def apply_marks(ledger: Ledger, marks: dict[int, float]) -> None:
             ledger.update_mark(trade, marks[trade.id])
 
 
+def _session_owns(ib: Any, account: str) -> bool:
+    """True when the connected IB session manages ``account``."""
+    if not account:
+        return False
+    try:
+        return account in (ib.managedAccounts() or [])
+    except Exception:
+        logger.warning("Could not read the session's managed accounts", exc_info=True)
+        return False
+
+
 async def sync_positions_and_marks(
     *,
     client: Any,
@@ -226,6 +237,7 @@ async def sync_positions_and_marks(
 
     ib_trades: list[Any] = []
     fills: list[Any] = []
+    executions_ok = False
     positions: list[Any] = []
     positions_ok = False
 
@@ -241,6 +253,7 @@ async def sync_positions_and_marks(
                 fills = list(fills) + list(await active_ib.reqExecutionsAsync(
                     ExecutionFilter(acctCode=account)
                 ))
+                executions_ok = True
         except Exception:
             logger.warning("Execution history unavailable; replaying cached executions", exc_info=True)
         reconciled = reconcile_broker_activity(ledger, ib_trades, fills, account=account, mode=getattr(runtime,"mode",None))
@@ -255,10 +268,18 @@ async def sync_positions_and_marks(
     except Exception as e:
         logger.debug("Reading account positions failed: %s", e)
 
-    # 2a. Ask IB about entry orders the placer stopped managing 15+ minutes ago
-    if positions_ok and account:
+    # 2a. Ask IB about entry orders the placer no longer manages. Only on a session
+    # that owns the account: live modes can fall back to the paper session.
+    if positions_ok and _session_owns(active_ib, account):
         try:
-            await check_unresolved_entries(ledger, active_ib, account, fills, positions)
+            await check_unresolved_entries(
+                ledger,
+                active_ib,
+                account,
+                fills,
+                positions,
+                executions_verified=executions_ok,
+            )
         except Exception:
             logger.warning("Active entry-order check failed", exc_info=True)
             session.rollback()
@@ -266,6 +287,7 @@ async def sync_positions_and_marks(
         warn_missing_fees(session, datetime.now(UTC))
     except Exception:
         logger.warning("Commission check failed", exc_info=True)
+        session.rollback()
 
     # 2b. Cancel orphaned WORKING trades stuck without broker_order_id
     if positions_ok:

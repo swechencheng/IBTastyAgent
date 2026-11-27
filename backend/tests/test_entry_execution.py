@@ -259,3 +259,29 @@ async def test_fill_check_sees_a_lot_the_background_sync_already_applied(
 def test_placer_rejects_an_unbounded_execution_wait(mock_client, wait):
     with pytest.raises(ValueError):
         IBKRPlacer(mock_client, execution_wait=wait)
+
+
+async def test_entry_walk_stops_when_the_market_closes(mock_client, monkeypatch):
+    # Arrange: the first price is not filled and the market closes mid-walk.
+    ledger, trade = setup_lot()
+    orders = mock_submissions(mock_client)
+
+    def cancel(order):
+        orders[-1].orderStatus.status = "Cancelled"
+
+    mock_client.trading_ib.cancelOrder.side_effect = cancel
+    monkeypatch.setattr("tastyagent.ibkr.placer.is_market_open", lambda: False)
+    placer = IBKRPlacer(
+        mock_client,
+        walk_interval=0,
+        walk_step=0.10,
+        index_call_min_credit_width_ratio=0.201,
+    )
+
+    # Act
+    result = await Executor(ledger, TradingMode.SANDBOX, placer)._place(trade)
+
+    # Assert
+    assert result.action == "error"
+    assert len(orders) == 1
+    assert trade.status == TradeStatus.CANCELED

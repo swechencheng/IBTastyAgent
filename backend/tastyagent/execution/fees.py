@@ -22,6 +22,7 @@ from ..db.models import BrokerExecution, ExecutionOrder
 FEE_GRACE = timedelta(minutes=10)
 IN_FLIGHT_WINDOW = timedelta(minutes=15)
 REPORT_SETTLE_SECONDS = 5.0
+RECONNECT_RETRY_WAIT_SECONDS = 15.0
 MAX_LISTED = 10
 
 logger = logging.getLogger(__name__)
@@ -100,10 +101,16 @@ def _scan(
     session = open_session()
     try:
         since = datetime.combine(day, time(0), tzinfo=market_calendar.ET)
-        missing = missing_fee_executions(session, since=since, before=now)
+        missing = missing_fee_executions(session, since=since, before=now - FEE_GRACE)
         return len(missing), orders_in_flight(session, now)
     finally:
         session.close()
+
+
+def _needs_recovery(open_session: Callable[[], Any], day: date, now: datetime) -> int:
+    """Commissions missing past the grace period, or 0 while an order is in flight."""
+    missing, busy = _scan(open_session, day, now)
+    return 0 if busy else missing
 
 
 @dataclass
@@ -111,6 +118,7 @@ class FeeRecovery:
     """Reconnect once per trading day after the close when commissions are missing."""
 
     settle_seconds: float = REPORT_SETTLE_SECONDS
+    retry_wait_seconds: float = RECONNECT_RETRY_WAIT_SECONDS
     last_day: date | None = None
 
     async def run(
@@ -120,15 +128,23 @@ class FeeRecovery:
         resync: Callable[[], Awaitable[Any]],
         *,
         now: datetime | None = None,
+        live: bool = False,
     ) -> bool:
-        """Return True when a reconnect was attempted."""
+        """Return True when a reconnect was attempted.
+
+        A live session is never reconnected: the live gateway also carries the
+        market data and the trading connection.
+        """
         now = now or datetime.now(UTC)
         day = now.astimezone(market_calendar.ET).date()
         hours = market_calendar.session_on(day)
-        if hours is None or now < hours[1] or self.last_day == day:
+        if live or hours is None or now < hours[1] or self.last_day == day:
             return False
-        missing, busy = _scan(open_session, day, now)
-        if not missing or busy:
+        if not _needs_recovery(open_session, day, now):
+            return False
+        await resync()  # the live session may already hold the reports
+        missing = _needs_recovery(open_session, day, now)
+        if not missing:
             return False
         self.last_day = day
         logger.warning(
@@ -136,13 +152,15 @@ class FeeRecovery:
             "%d missing commission(s)",
             missing,
         )
-        if not await client.reconnect_trading():
+        reconnected = await client.reconnect_trading()
+        if not reconnected:
             logger.warning(
-                "Trading session reconnect failed; commissions stay missing "
-                "until the next reconnect"
+                "Trading session reconnect failed; resyncing after the keep-alive "
+                "monitor reconnects"
             )
-            return True
-        await asyncio.sleep(self.settle_seconds)
+        await asyncio.sleep(
+            self.settle_seconds if reconnected else self.retry_wait_seconds
+        )
         await resync()
         still, _ = _scan(open_session, day, now)
         report = logger.warning if still else logger.info

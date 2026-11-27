@@ -152,7 +152,7 @@ async def test_reconnects_once_after_the_close_when_fees_are_missing(tmp_path):
     # Assert
     assert first and not again
     client.reconnect_trading.assert_awaited_once()
-    resync.assert_awaited_once()
+    assert resync.await_count == 2  # before and after the reconnect
 
 
 async def test_waits_for_the_close_before_reconnecting(tmp_path):
@@ -196,6 +196,84 @@ async def test_never_reconnects_while_an_order_is_in_flight(tmp_path):
 async def test_skips_the_reconnect_when_no_fee_is_missing(tmp_path):
     # Arrange
     open_session = ledger_db(tmp_path)
+    client = reconnecting_client()
+
+    # Act
+    ran = await FeeRecovery(settle_seconds=0).run(
+        client, open_session, AsyncMock(), now=AFTER_CLOSE
+    )
+
+    # Assert
+    assert not ran
+    client.reconnect_trading.assert_not_awaited()
+
+
+async def test_a_resync_alone_can_book_the_missing_fees(tmp_path):
+    # Arrange: the live session already holds the reports.
+    open_session = ledger_db(tmp_path)
+    with_missing_fee(open_session)
+    client = reconnecting_client()
+
+    async def book_fees():
+        session = open_session()
+        for row in session.scalars(select(BrokerExecution)):
+            row.fee = 1.04
+        session.commit()
+        session.close()
+
+    # Act
+    ran = await FeeRecovery(settle_seconds=0).run(
+        client, open_session, book_fees, now=AFTER_CLOSE
+    )
+
+    # Assert
+    assert not ran
+    client.reconnect_trading.assert_not_awaited()
+
+
+async def test_still_resyncs_when_the_reconnect_fails(tmp_path):
+    # Arrange
+    open_session = ledger_db(tmp_path)
+    with_missing_fee(open_session)
+    client = reconnecting_client()
+    client.reconnect_trading.return_value = False
+    resync = AsyncMock()
+
+    # Act
+    ran = await FeeRecovery(settle_seconds=0, retry_wait_seconds=0).run(
+        client, open_session, resync, now=AFTER_CLOSE
+    )
+
+    # Assert
+    assert ran
+    assert resync.await_count == 2
+
+
+async def test_never_reconnects_a_live_session(tmp_path):
+    # Arrange
+    open_session = ledger_db(tmp_path)
+    with_missing_fee(open_session)
+    client = reconnecting_client()
+
+    # Act
+    ran = await FeeRecovery(settle_seconds=0).run(
+        client, open_session, AsyncMock(), now=AFTER_CLOSE, live=True
+    )
+
+    # Assert
+    assert not ran
+    client.reconnect_trading.assert_not_awaited()
+
+
+async def test_ignores_fills_inside_the_grace_period(tmp_path):
+    # Arrange: a fill two minutes ago whose report may still be on its way.
+    open_session = ledger_db(tmp_path)
+    session = open_session()
+    intent = entry_intent(Ledger(session))
+    intent.status, intent.terminal = "Filled", True
+    session.add(execution(intent, at=AFTER_CLOSE - timedelta(minutes=2)))
+    session.commit()
+    session.close()
     client = reconnecting_client()
 
     # Act

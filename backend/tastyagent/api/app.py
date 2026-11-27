@@ -837,7 +837,10 @@ def create_app(
                         app.state.initial_pnl_synced = True
                     else:
                         await app.state.fee_recovery.run(
-                            client, session_factory, lambda bound=client: _sync_once(bound)
+                            client,
+                            session_factory,
+                            lambda bound=client: _sync_once(bound),
+                            live=getattr(app.state.runtime.mode, "is_live", False),
                         )
             except asyncio.CancelledError:
                 break

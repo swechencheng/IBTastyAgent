@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+import pytest
+
 from tastyagent.models import (
     Action,
     CandidateTrade,
@@ -92,3 +94,9 @@ def make_position(
         dte_remaining=dte_remaining,
         as_of=entry + timedelta(days=days_held),
     )
+
+
+@pytest.fixture(autouse=True)
+def _market_open_for_entry_walks(monkeypatch):
+    """Entry walks stop at the close; keep tests independent of the wall clock."""
+    monkeypatch.setattr("tastyagent.ibkr.placer.is_market_open", lambda: True)
