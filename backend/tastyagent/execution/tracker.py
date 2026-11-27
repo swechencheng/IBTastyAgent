@@ -8,7 +8,7 @@ to the ledger.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 import logging
 from typing import Any, Callable, Optional
 
@@ -17,6 +17,8 @@ from sqlalchemy import select
 from ..config import TradingMode
 from ..risk.session import account_modes
 from ..db.models import EquitySnapshot, ExecutionOrder, Trade, TradeStatus
+from .entry_watch import check_unresolved_entries
+from .fees import warn_missing_fees
 from .reconciliation import broker_account, reconcile_broker_activity
 from ..portfolio.ledger import Ledger
 from ..portfolio.pnl import summarize
@@ -223,6 +225,7 @@ async def sync_positions_and_marks(
         return {"reconciled": 0, "marks_updated": 0, "error": "IBKR not connected"}
 
     ib_trades: list[Any] = []
+    fills: list[Any] = []
     positions: list[Any] = []
     positions_ok = False
 
@@ -251,6 +254,18 @@ async def sync_positions_and_marks(
         positions_ok = True
     except Exception as e:
         logger.debug("Reading account positions failed: %s", e)
+
+    # 2a. Ask IB about entry orders the placer stopped managing 15+ minutes ago
+    if positions_ok and account:
+        try:
+            await check_unresolved_entries(ledger, active_ib, account, fills, positions)
+        except Exception:
+            logger.warning("Active entry-order check failed", exc_info=True)
+            session.rollback()
+    try:
+        warn_missing_fees(session, datetime.now(UTC))
+    except Exception:
+        logger.warning("Commission check failed", exc_info=True)
 
     # 2b. Cancel orphaned WORKING trades stuck without broker_order_id
     if positions_ok:

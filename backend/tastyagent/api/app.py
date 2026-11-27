@@ -28,6 +28,8 @@ from ..portfolio.ledger import Ledger
 from ..portfolio.pnl import summarize
 from ..portfolio.watchlist import WatchlistRepo
 from ..risk.session import account_modes
+from .. import market_calendar
+from ..execution.fees import FeeRecovery
 from ..scheduler import is_market_open
 from .runtime import Runtime
 from .schemas import (
@@ -808,6 +810,18 @@ def create_app(
         # Allow initial gateway connections to complete
         await asyncio.sleep(3.0)
 
+        async def _sync_once(client) -> None:
+            sess = session_factory()
+            try:
+                await sync_positions_and_marks(
+                    client=client,
+                    session=sess,
+                    runtime=getattr(app.state, "runtime", None),
+                    live_mark_fn=_live_mark,
+                )
+            finally:
+                sess.close()
+
         while getattr(app.state, "pnl_poll_running", True):
             try:
                 client = getattr(app.state, "client", None)
@@ -816,19 +830,15 @@ def create_app(
                     and getattr(client, "active_trading_ib", None)
                     and client.active_trading_ib.isConnected()
                 ):
+                    await market_calendar.ensure_loaded(client.active_trading_ib)
                     initial_synced = getattr(app.state, "initial_pnl_synced", False)
                     if is_market_open() or not initial_synced:
-                        sess = session_factory()
-                        try:
-                            await sync_positions_and_marks(
-                                client=client,
-                                session=sess,
-                                runtime=getattr(app.state, "runtime", None),
-                                live_mark_fn=_live_mark,
-                            )
-                            app.state.initial_pnl_synced = True
-                        finally:
-                            sess.close()
+                        await _sync_once(client)
+                        app.state.initial_pnl_synced = True
+                    else:
+                        await app.state.fee_recovery.run(
+                            client, session_factory, lambda bound=client: _sync_once(bound)
+                        )
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -892,6 +902,11 @@ def create_app(
             logger.warning("Startup trade reconciliation failed: %s", e)
         finally:
             gen.close()
+
+        # Load today's real session hours before the scheduler can start a cycle
+        if broker_ok:
+            await market_calendar.ensure_loaded(active_ib)
+        app.state.fee_recovery = FeeRecovery()
 
         # Start 5-minute position mark & PnL polling loop
         app.state.pnl_poll_running = True

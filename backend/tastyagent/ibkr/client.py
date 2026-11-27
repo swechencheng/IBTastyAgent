@@ -382,6 +382,25 @@ class IBKRClient:
 
         logger.info("Disconnected from IBKR.")
 
+    async def reconnect_trading(self, timeout: float = 10.0) -> bool:
+        """Re-open the active trading session.
+
+        IB re-sends today's executions and their commission reports only to a fresh
+        connection, so this recovers commissions the live session missed.
+        """
+        monitoring = self._monitor_task is not None and not self._monitor_task.done()
+        self.stop_connection_monitor()
+        live = self.settings.mode.is_live
+        ib = self.data_ib if live else self.trading_ib
+        try:
+            if ib.isConnected():
+                ib.disconnect()
+            connect = self._try_connect_data if live else self._try_connect_trading
+            return await connect(timeout=timeout)
+        finally:
+            if monitoring:
+                self.start_connection_monitor()
+
     async def __aenter__(self) -> IBKRClient:
         await self.connect()
         return self

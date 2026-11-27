@@ -4,34 +4,33 @@ A lightweight async loop that invokes an async ``tick`` callable on an interval,
 optionally gated to regular US equity market hours. The tick (wired in the app
 layer) runs one full cycle: gather state -> orchestrate -> execute -> reconcile.
 
-Holiday awareness is intentionally omitted here; TastyTrade's market-sessions
-endpoint can refine ``is_market_open`` later. Kept free of broker/LLM imports so
-the gating logic stays simple and the loop is easy to drive from the API or a CLI.
+Session hours come from ``market_calendar``: IB's published hours, including
+holidays and early closes, with weekday 09:30-16:00 ET for days IB has not
+described. Kept free of broker/LLM imports so the gating logic stays simple and
+the loop is easy to drive from the API or a CLI.
 """
 
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, time, timedelta
+from datetime import UTC, datetime, time, timedelta
 import logging
 import time as time_mod
 from typing import Awaitable, Callable
-from zoneinfo import ZoneInfo
 
-ET = ZoneInfo("America/New_York")
-MARKET_OPEN = time(9, 30)
-MARKET_CLOSE = time(16, 0)
+from .market_calendar import ET, session_on
+
 DEFAULT_OPEN_DELAY_MINUTES = 15
+SESSION_SEARCH_DAYS = 14
 
 logger = logging.getLogger("tastyagent.scheduler")
 
 
 def is_market_open(now: datetime | None = None) -> bool:
-    """True during regular US equity hours (weekday 9:30-16:00 ET). No holidays."""
+    """True during the day's regular session (IB hours, else weekday 9:30-16:00 ET)."""
     now = (now or datetime.now(ET)).astimezone(ET)
-    if now.weekday() >= 5:  # Sat/Sun
-        return False
-    return MARKET_OPEN <= now.time() <= MARKET_CLOSE
+    session = session_on(now.date())
+    return session is not None and session[0] <= now <= session[1]
 
 
 def decision_window_start(open_delay_minutes: int = DEFAULT_OPEN_DELAY_MINUTES) -> time:
@@ -41,63 +40,43 @@ def decision_window_start(open_delay_minutes: int = DEFAULT_OPEN_DELAY_MINUTES) 
     return time((total_minutes // 60) % 24, total_minutes % 60)
 
 
+def _open_delay(open_delay_minutes: int) -> timedelta:
+    return timedelta(minutes=max(0, int(open_delay_minutes)))
+
+
 def is_decision_window_open(
     now: datetime | None = None,
     open_delay_minutes: int = DEFAULT_OPEN_DELAY_MINUTES,
 ) -> bool:
-    """True during regular US equity hours after the opening IV stabilization delay.
+    """True inside the day's session once the opening IV stabilization delay has passed.
 
-    Weekday (09:30 + open_delay_minutes) to 16:00 ET. For example, with
-    open_delay_minutes=15, the window is 09:45-16:00 ET.
+    With open_delay_minutes=15 a regular day's window is 09:45-16:00 ET; an
+    early-close day's window ends at the early close, and holidays have none.
     """
     now = (now or datetime.now(ET)).astimezone(ET)
-    if now.weekday() >= 5:  # Sat/Sun
+    session = session_on(now.date())
+    if session is None:
         return False
-    start_time = decision_window_start(open_delay_minutes)
-    return start_time <= now.time() <= MARKET_CLOSE
+    return session[0] + _open_delay(open_delay_minutes) <= now <= session[1]
 
 
 def seconds_until_decision_window(
     now: datetime | None = None,
     open_delay_minutes: int = DEFAULT_OPEN_DELAY_MINUTES,
 ) -> float:
-    """Seconds from `now` until the decision window opens.
+    """Seconds from ``now`` until the next decision window opens; 0.0 inside one.
 
-    If currently inside the decision window (e.g. 09:45-16:00 ET on a weekday), returns 0.0.
-    If today is a weekday and before the decision window (e.g. between 09:30 and 09:45, or earlier),
-    returns the seconds until today's decision window open.
-    If after market close today, or on a weekend, returns the seconds until the next trading day's
-    decision window open.
+    Skips weekends, exchange holidays and days whose window has already passed.
     """
     now = (now or datetime.now(ET)).astimezone(ET)
     if is_decision_window_open(now, open_delay_minutes):
         return 0.0
-
-    start_time = decision_window_start(open_delay_minutes)
-
-    if now.weekday() < 5 and now.time() < start_time:
-        target_dt = now.replace(
-            hour=start_time.hour,
-            minute=start_time.minute,
-            second=start_time.second,
-            microsecond=0,
-        )
-        return max(0.0, (target_dt - now).total_seconds())
-
-    # Find the next weekday trading day
-    days_ahead = 1
-    next_day = now + timedelta(days=days_ahead)
-    while next_day.weekday() >= 5:
-        days_ahead += 1
-        next_day = now + timedelta(days=days_ahead)
-
-    target_dt = next_day.replace(
-        hour=start_time.hour,
-        minute=start_time.minute,
-        second=start_time.second,
-        microsecond=0,
-    )
-    return max(0.0, (target_dt - now).total_seconds())
+    delay = _open_delay(open_delay_minutes)
+    for days_ahead in range(SESSION_SEARCH_DAYS):
+        session = session_on(now.date() + timedelta(days=days_ahead))
+        if session is not None and session[0] + delay > now:
+            return (session[0] + delay - now.astimezone(UTC)).total_seconds()
+    return 0.0
 
 
 async def _sleep_interruptible(

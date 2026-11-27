@@ -18,6 +18,7 @@ from ..db.models import (
     TradeLeg,
     TradeStatus,
 )
+from .fees import note_rejected_commission
 
 CANCELLED = {"Cancelled", "Canceled", "ApiCancelled", "Inactive", "Rejected", "Expired"}
 
@@ -249,15 +250,18 @@ def _capture(session, intent, fill):
     if row.intent_id != intent.id:
         return
     report = getattr(fill, "commissionReport", None)
+    if getattr(report, "execId", None) != e.execId:
+        return  # IB has not delivered this execution's commission report
     fee = getattr(report, "commission", None)
     if (
-        getattr(report, "execId", None) == e.execId
-        and getattr(report, "currency", "") == "USD"
+        getattr(report, "currency", "") == "USD"
         and fee is not None
         and math.isfinite(fee)
         and abs(fee) < 1e10
     ):
         row.fee = fee
+    elif row.fee is None:
+        note_rejected_commission(e.execId, report)
 
 
 def _economics(intent, executions):
