@@ -74,7 +74,12 @@ def reconcile_stale_working_trades(
     now: Optional[datetime] = None,
     mode: TradingMode | None = None,
 ) -> int:
-    """Cancel orphaned WORKING trades that never received a broker_order_id."""
+    """Cancel stale WORKING entries that have no live or filled broker order.
+
+    A journaled entry is settled by its own orders: once the broker has ended every
+    attempt with nothing applied, other lots on the same underlying prove nothing.
+    Only unjournaled legacy rows fall back to the symbol-level position check.
+    """
     current_time = _as_utc(now) if now is not None else datetime.now(timezone.utc)
     canceled = 0
     modes = account_modes(mode) if isinstance(mode, TradingMode) else None
@@ -83,24 +88,29 @@ def reconcile_stale_working_trades(
             continue
         if trade.status != TradeStatus.WORKING or trade.broker_order_id:
             continue
-        if ledger.s.scalar(select(ExecutionOrder.id).where(
-            ExecutionOrder.trade_id == trade.id, ExecutionOrder.terminal.is_(False)
-        ).limit(1)):
+        orders = list(
+            ledger.s.scalars(
+                select(ExecutionOrder).where(ExecutionOrder.trade_id == trade.id)
+            )
+        )
+        if any(not order.terminal or order.applied for order in orders):
             continue
         if _has_matching_broker_order(trade, ib_trades):
             continue
-        if _has_matching_broker_position(trade, positions):
+        if not orders and _has_matching_broker_position(trade, positions):
             continue
-        age_seconds = (current_time - _as_utc(trade.created_at)).total_seconds()
+        last_activity = max(
+            _as_utc(ts) for ts in (trade.created_at, *(o.created_at for o in orders))
+        )
+        age_seconds = (current_time - last_activity).total_seconds()
         if age_seconds < stale_after_seconds:
             continue
-        ledger.cancel_trade(
-            trade,
-            reason=(
-                "stale WORKING trade with no broker_order_id "
-                f"(age={int(age_seconds)}s)"
-            ),
+        reason = (
+            f"entry never filled: {len(orders)} broker order(s) ended unfilled"
+            if orders
+            else f"stale WORKING trade with no broker_order_id (age={int(age_seconds)}s)"
         )
+        ledger.cancel_trade(trade, reason=reason)
         canceled += 1
     return canceled
 

@@ -43,6 +43,11 @@ from .orders import (
 
 logger = logging.getLogger(__name__)
 
+# IB can report an order Filled seconds before it delivers the execution details
+# that the journal needs to verify the lot. Poll for them before giving up.
+EXECUTION_WAIT_SECONDS = 15.0
+EXECUTION_POLL_SECONDS = 0.5
+
 _LEG_ACTION_MAP = {
     "sell_to_open": "SELL",
     "buy_to_open": "BUY",
@@ -76,7 +81,10 @@ class IBKRPlacer:
         index_call_min_credit_width_ratio: float = 0.20,
         entry_guard: Callable[[Trade], None] | None = None,
         additional_min_credit: float = 0.0,
+        execution_wait: float = EXECUTION_WAIT_SECONDS,
     ) -> None:
+        if not math.isfinite(execution_wait) or execution_wait < 0:
+            raise ValueError("execution_wait must be finite, non-negative seconds")
         self.client = client
         self.walk_step = walk_step
         self.walk_interval = walk_interval
@@ -87,6 +95,7 @@ class IBKRPlacer:
         self.index_call_min_credit_width_ratio = index_call_min_credit_width_ratio
         self.entry_guard = entry_guard
         self.additional_min_credit = additional_min_credit
+        self.execution_wait = execution_wait
 
     @property
     def ib(self) -> IB:
@@ -151,6 +160,25 @@ class IBKRPlacer:
         is_combo = len(leg_pairs) > 1
         single_leg_open_action = leg_pairs[0][1]
         return contract, is_combo, single_leg_open_action
+
+    async def _await_verified_entry(self, ledger, intent, trade, broker_trade, account) -> bool:
+        """Settle a reported fill from its executions, which may trail the status."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.execution_wait
+        while True:
+            # The background sync settles lots in its own session; never apply a
+            # fill on top of a stale cached row.
+            ledger.s.refresh(trade)
+            reconcile_broker_activity(
+                ledger, [broker_trade], list(broker_trade.fills), account=account
+            )
+            ledger.s.refresh(intent)
+            ledger.s.refresh(trade)
+            if intent.terminal and intent.applied >= 1 and trade.status == TradeStatus.OPEN:
+                return True
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(EXECUTION_POLL_SECONDS)
 
     async def __call__(self, trade: Trade) -> str:
         """Open a position for net credit with walk-the-book and attach Take Profit."""
@@ -330,12 +358,9 @@ class IBKRPlacer:
                 if status == "Filled" or filled_qty >= requested_qty or (ended and filled_qty > 0):
                     fill_credit = abs(parent_trade.orderStatus.avgFillPrice)
                     if ledger:
-                        reconcile_broker_activity(
-                            ledger, [parent_trade], list(parent_trade.fills), account=account
-                        )
-                        ledger.s.refresh(intent)
-                        ledger.s.refresh(trade)
-                        if not intent.terminal or intent.applied < 1 or trade.status != TradeStatus.OPEN:
+                        if not await self._await_verified_entry(
+                            ledger, intent, trade, parent_trade, account
+                        ):
                             raise RuntimeError("Entry awaiting verified broker executions")
                         fill_credit = trade.entry_credit / (100 * trade.contracts)
                     elif ended and filled_qty < requested_qty:

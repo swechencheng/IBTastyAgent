@@ -1,6 +1,7 @@
 """Broker callbacks, delayed fills and the limit-price boundary on opening orders."""
 
-from datetime import datetime, timezone
+import asyncio
+from datetime import UTC, datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -8,9 +9,19 @@ from ib_async import CommissionReport, Execution, Fill, OrderStatus
 from sqlalchemy import select
 
 from tastyagent.config import TradingMode
-from tastyagent.db.models import ExecutionOrder, TradeStatus
-from tastyagent.db.session import in_memory_session
+from tastyagent.db.models import ExecutionOrder, TradeEvent, TradeStatus
+from tastyagent.db.session import (
+    in_memory_session,
+    init_db,
+    make_engine,
+    session_factory,
+)
 from tastyagent.execution.executor import Executor
+from tastyagent.execution.reconciliation import (
+    bind_order,
+    prepare_order,
+    reconcile_broker_activity,
+)
 from tastyagent.ibkr.placer import IBKRPlacer
 from tastyagent.models import Action, OptionType, Strategy
 from tastyagent.portfolio.ledger import Ledger
@@ -21,8 +32,8 @@ from .conftest import make_candidate, make_leg
 pytest_plugins = ("tests.test_ibkr_placer",)
 
 
-def setup_lot():
-    ledger = Ledger(in_memory_session())
+def setup_lot(session=None):
+    ledger = Ledger(session or in_memory_session())
     lots = make_candidate(
         symbol="SPY",
         strategy=Strategy.CALL_CREDIT_SPREAD,
@@ -113,7 +124,7 @@ async def test_fill_racing_cancel_requires_execution_before_open(mock_client, qu
             )
 
     mock_client.trading_ib.cancelOrder.side_effect = cancel
-    placer = IBKRPlacer(mock_client, walk_interval=0)
+    placer = IBKRPlacer(mock_client, walk_interval=0, execution_wait=0)
     result = await Executor(ledger, TradingMode.SANDBOX, placer)._place(trade)
     if quantity == 0:
         assert result.action == "error"
@@ -147,3 +158,104 @@ async def test_unacknowledged_tp_is_never_submitted_twice(mock_client):
         await placer.attach_take_profit(trade)
     assert await placer.attach_take_profit(trade) is None
     assert mock_client.trading_ib.placeOrder.call_count == 1
+
+
+def execution_of(placed, quantity, exec_id="execution-late"):
+    now = datetime.now(UTC)
+    e = Execution(
+        execId=exec_id,
+        acctNumber=placed.order.account,
+        permId=placed.order.permId,
+        orderRef=placed.order.orderRef,
+        shares=quantity,
+        side="BOT",
+        price=-1.05,
+        time=now,
+    )
+    report = CommissionReport(execId=exec_id, commission=0.5, currency="USD")
+    return Fill(placed.contract, e, report, now)
+
+
+async def test_entry_waits_for_executions_that_trail_the_filled_status(mock_client):
+    # Arrange: IB reports the entry Filled before it delivers the execution details.
+    ledger, trade = setup_lot()
+    orders = mock_submissions(mock_client)
+    submit = mock_client.trading_ib.placeOrder.side_effect
+    loop = asyncio.get_running_loop()
+
+    def fill_entry_with_late_executions(contract, order):
+        placed = submit(contract, order)
+        if len(orders) == 1:
+            placed.orderStatus = OrderStatus(
+                status="Filled", filled=2, avgFillPrice=-1.05
+            )
+            loop.call_later(0.3, placed.fills.append, execution_of(placed, 2))
+        return placed
+
+    mock_client.trading_ib.placeOrder.side_effect = fill_entry_with_late_executions
+    placer = IBKRPlacer(mock_client, walk_interval=0)
+
+    # Act
+    result = await Executor(ledger, TradingMode.SANDBOX, placer)._place(trade)
+
+    # Assert
+    assert result.action == "placed"
+    assert trade.status == TradeStatus.OPEN
+    assert trade.contracts == 2
+    assert orders[-1].order.orderRef.startswith("TastyAgent_TP_")
+    events = ledger.s.execute(
+        select(TradeEvent.kind, TradeEvent.detail).where(
+            TradeEvent.trade_id == trade.id
+        )
+    ).all()
+    assert [kind for kind, _ in events].count("open") == 1
+    assert not any("placement error" in detail for _, detail in events)
+    entry = ledger.s.scalar(
+        select(ExecutionOrder).where(
+            ExecutionOrder.trade_id == trade.id, ExecutionOrder.kind == "entry"
+        )
+    )
+    assert entry.terminal and entry.applied == 2
+
+
+async def test_fill_check_sees_a_lot_the_background_sync_already_applied(
+    tmp_path, mock_client
+):
+    # Arrange: the placer and the background sync hold separate sessions on one
+    # ledger. The sync applies the first lot between the two partial fills.
+    engine = make_engine(f"sqlite:///{tmp_path / 'ledger.db'}")
+    init_db(engine)
+    new_session = session_factory(engine)
+    ledger, trade = setup_lot(new_session())
+    account = "DU123456"
+    intent = prepare_order(ledger, trade, "entry", account=account)
+    bind_order(ledger, intent, order_id=100, perm_id=1100, status="Submitted")
+    ledger.s.refresh(trade)  # the placer last saw the row WORKING
+    order = SimpleNamespace(
+        contract=SimpleNamespace(secType="BAG", symbol="SPY"),
+        order=SimpleNamespace(
+            orderId=100, permId=1100, orderRef=intent.order_ref, account=account
+        ),
+        orderStatus=OrderStatus(status="Submitted", filled=1),
+        fills=[],
+        log=[],
+    )
+    order.fills.append(execution_of(order, 1, "lot-1"))
+    reconcile_broker_activity(Ledger(new_session()), [order], [], account=account)
+    order.orderStatus = OrderStatus(status="Filled", filled=2)
+    order.fills.append(execution_of(order, 1, "lot-2"))
+    placer = IBKRPlacer(mock_client, execution_wait=0)
+
+    # Act
+    verified = await placer._await_verified_entry(ledger, intent, trade, order, account)
+
+    # Assert
+    assert verified
+    assert trade.status == TradeStatus.OPEN
+    assert trade.contracts == 2
+
+
+@pytest.mark.parametrize("wait", [float("nan"), float("inf"), -1.0])
+def test_placer_rejects_an_unbounded_execution_wait(mock_client, wait):
+    with pytest.raises(ValueError):
+        IBKRPlacer(mock_client, execution_wait=wait)
