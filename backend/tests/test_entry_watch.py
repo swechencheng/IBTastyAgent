@@ -14,7 +14,11 @@ from tastyagent.db.models import BrokerExecution, TradeEvent, TradeStatus
 from tastyagent.db.session import in_memory_session
 from tastyagent.execution import entry_watch
 from tastyagent.execution.entry_watch import check_unresolved_entries
-from tastyagent.execution.reconciliation import bind_order, prepare_order
+from tastyagent.execution.reconciliation import (
+    bind_order,
+    outstanding_tp_ref,
+    prepare_order,
+)
 from tastyagent.execution.tracker import sync_positions_and_marks
 from tastyagent.market_calendar import ET
 from tastyagent.portfolio.ledger import Ledger
@@ -330,6 +334,124 @@ async def test_one_failing_intent_does_not_stop_the_others():
     assert settled == 1
     assert lost_intent.status == "NotFound"
     assert not live_intent.terminal
+
+
+def position_on(trade, leg):
+    right = str(getattr(leg.option_type, "value", leg.option_type))[:1].upper()
+    contract = NS(
+        symbol=trade.symbol,
+        secType="OPT",
+        right=right,
+        strike=leg.strike,
+        lastTradeDateOrContractMonth=str(leg.expiration).replace("-", ""),
+    )
+    return NS(contract=contract, position=-1)
+
+
+def open_lot_with_orphaned_tp(ledger, *, age=ABANDONED):
+    """An open lot whose take-profit was journaled but never acknowledged by IB."""
+    trade = ledger.record_planned(
+        make_candidate(symbol="NVDA"), 1, "test", TradingMode.SANDBOX
+    )
+    trade.execution_verified = True
+    ledger.mark_open(trade)
+    ledger.s.commit()
+    tp = prepare_order(ledger, trade, "tp", account=ACCOUNT)
+    tp.created_at = (NOW - age).replace(tzinfo=None)
+    ledger.s.commit()
+    return trade, tp
+
+
+async def test_clears_a_take_profit_that_never_reached_ib():
+    # Arrange: placeOrder failed after the TP was journaled; the lot is still held.
+    ledger = Ledger(in_memory_session())
+    trade, tp = open_lot_with_orphaned_tp(ledger)
+    held = [position_on(trade, leg) for leg in trade.legs]
+
+    # Act
+    settled = await check(ledger, broker(), held)
+
+    # Assert
+    assert settled == 1
+    assert tp.terminal and tp.status == "NotFound"
+    assert outstanding_tp_ref(ledger, trade.id, ACCOUNT) is None
+
+
+async def test_binds_an_unacknowledged_take_profit_found_working():
+    # Arrange: the ACK was lost, but IB has the TP resting.
+    ledger = Ledger(in_memory_session())
+    trade, tp = open_lot_with_orphaned_tp(ledger)
+    working = NS(
+        order=NS(
+            orderRef=tp.order_ref,
+            orderId=2781,
+            permId=988015663,
+            account=ACCOUNT,
+            filledQuantity=0.0,
+        ),
+        orderStatus=NS(status="PreSubmitted", filled=0.0, permId=988015663),
+        fills=[],
+        log=[],
+    )
+    ib = broker(open_orders=[working])
+
+    # Act
+    settled = await check(ledger, ib)
+
+    # Assert
+    assert settled == 1
+    assert trade.tp_order_id == "2781"
+    ib.cancelOrder.assert_not_called()
+
+
+async def test_keeps_an_unacknowledged_take_profit_once_the_position_is_gone():
+    # Arrange: none of the lot's legs are held, so the TP may have closed it.
+    ledger = Ledger(in_memory_session())
+    trade, tp = open_lot_with_orphaned_tp(ledger)
+
+    # Act
+    settled = await check(ledger, broker())
+
+    # Assert
+    assert settled == 0
+    assert not tp.terminal
+    assert any("needs review" in detail for detail in order_checks(ledger, trade))
+
+
+async def test_leaves_acknowledged_take_profits_alone():
+    # Arrange: a resting GTC take-profit bound to its broker order.
+    ledger = Ledger(in_memory_session())
+    _, tp = open_lot_with_orphaned_tp(ledger)
+    bind_order(ledger, tp, order_id=2781, perm_id=988015663, status="PreSubmitted")
+    ib = broker()
+
+    # Act
+    settled = await check(ledger, ib)
+
+    # Assert
+    assert settled == 0
+    ib.reqAllOpenOrdersAsync.assert_not_awaited()
+
+
+async def test_order_lookups_never_overlap():
+    # Arrange: ib_async keys these requests by name, so they must run one at a time.
+    in_flight = peak = 0
+
+    async def lookup(*_):
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        return []
+
+    ib = MagicMock(reqCompletedOrdersAsync=lookup, reqAllOpenOrdersAsync=lookup)
+
+    # Act
+    await asyncio.gather(entry_watch._broker_views(ib), entry_watch._broker_views(ib))
+
+    # Assert
+    assert peak == 1
 
 
 async def test_sync_retires_an_entry_ib_never_saw():

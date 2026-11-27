@@ -16,6 +16,23 @@ from typing import Any
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+MIN_WALK_INTERVAL_SECONDS = 1
+# A walk step lives about two intervals plus the 15 s cancel deadline; keep it far
+# below the 15-minute orphan check in execution/entry_watch.py.
+MAX_WALK_INTERVAL_SECONDS = 60
+
+
+def walk_interval_ok(value: object) -> bool:
+    """True for a whole number of seconds within the supported walk-interval range."""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return False
+    return (
+        seconds.is_integer()
+        and MIN_WALK_INTERVAL_SECONDS <= seconds <= MAX_WALK_INTERVAL_SECONDS
+    )
+
 from .config import RiskLimits, StrategyParams, TradingMode
 
 
@@ -199,7 +216,12 @@ class Settings(BaseSettings):
     )
     ibkr_scan_rows: int = Field(default=25, alias="IBKR_SCAN_ROWS")
     ibkr_walk_step: float = Field(default=0.01, alias="IBKR_WALK_STEP")
-    ibkr_walk_interval: int = Field(default=5, alias="IBKR_WALK_INTERVAL")
+    ibkr_walk_interval: int = Field(
+        default=5,
+        ge=MIN_WALK_INTERVAL_SECONDS,
+        le=MAX_WALK_INTERVAL_SECONDS,
+        alias="IBKR_WALK_INTERVAL",
+    )
     ibkr_attach_tp: bool = Field(default=True, alias="IBKR_ATTACH_TP")
     ibkr_tp_pct: float = Field(default=0.50, alias="IBKR_TP_PCT")
     openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")

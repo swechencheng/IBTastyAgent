@@ -31,6 +31,7 @@ from ..execution.reconciliation import (
 from ..models import Strategy
 from ..portfolio.ledger import Ledger
 from ..scheduler import is_market_open
+from ..settings import MAX_WALK_INTERVAL_SECONDS
 from ..strategy.guardrails import entry_width_ratio
 from ..strategy.sizing import minimum_entry_credit
 from .client import IBKRClient
@@ -84,6 +85,10 @@ class IBKRPlacer:
         additional_min_credit: float = 0.0,
         execution_wait: float = EXECUTION_WAIT_SECONDS,
     ) -> None:
+        if not 0 <= walk_interval <= MAX_WALK_INTERVAL_SECONDS:
+            raise ValueError(
+                f"walk_interval must be 0-{MAX_WALK_INTERVAL_SECONDS} seconds"
+            )
         if not math.isfinite(execution_wait) or execution_wait < 0:
             raise ValueError("execution_wait must be finite, non-negative seconds")
         self.client = client

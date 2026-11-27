@@ -6,8 +6,10 @@ non-terminal. Fifteen minutes after placement (at once for intents journaled
 before this process started) this check asks IB directly: an order that is still
 working is canceled, a finished order is settled from IB's own status, and an
 order IB never saw is treated as unfilled only on strong evidence (same ET day,
-a fresh execution history, none of its legs held). Anything else is recorded
-for review.
+a fresh execution history, none of its legs held). A take-profit IB never
+acknowledged blocks every later TP; it is bound when IB has it working and
+cleared when IB never saw it while the lot is still held, never canceled.
+Anything else is recorded for review.
 """
 
 from __future__ import annotations
@@ -19,9 +21,10 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from ..db.models import ExecutionOrder, Trade, TradeStatus
+from ..ibkr.client import order_lookup_lock
 from ..market_calendar import ET
 from .reconciliation import reconcile_broker_activity
 
@@ -56,7 +59,7 @@ async def check_unresolved_entries(
     """
     now = now or datetime.now(UTC)
     cutoff = max(now - ENTRY_CHECK_AFTER, unmanaged_before or PROCESS_STARTED_AT)
-    stale = _stale_entries(ledger, account, cutoff)
+    stale = _stale_intents(ledger, account, cutoff)
     if not stale:
         return 0
     views = await _broker_views(ib)
@@ -92,12 +95,13 @@ async def _broker_views(ib: Any) -> dict[str, Any] | None:
     orphan ours; the timeout keeps the poller from waiting forever.
     """
     try:
-        completed = await asyncio.wait_for(
-            ib.reqCompletedOrdersAsync(True), IB_REQUEST_TIMEOUT_SECONDS
-        )
-        open_orders = await asyncio.wait_for(
-            ib.reqAllOpenOrdersAsync(), IB_REQUEST_TIMEOUT_SECONDS
-        )
+        async with order_lookup_lock():
+            completed = await asyncio.wait_for(
+                ib.reqCompletedOrdersAsync(True), IB_REQUEST_TIMEOUT_SECONDS
+            )
+            open_orders = await asyncio.wait_for(
+                ib.reqAllOpenOrdersAsync(), IB_REQUEST_TIMEOUT_SECONDS
+            )
     except TimeoutError:
         logger.warning("IB order lookup timed out; entry check skipped this cycle")
         return None
@@ -108,6 +112,8 @@ async def _broker_views(ib: Any) -> dict[str, Any] | None:
 
 def _resolve(ledger: Any, ib: Any, intent: ExecutionOrder, evidence: Any) -> int:
     """Act on one unresolved intent; return 1 when it was settled."""
+    if intent.kind == "tp":
+        return _resolve_tp(ledger, intent, evidence)
     trade = ledger.get(intent.trade_id)
     broker = evidence.views.get(intent.order_ref)
     status = broker.orderStatus.status if broker is not None else ""
@@ -138,31 +144,93 @@ def _resolve(ledger: Any, ib: Any, intent: ExecutionOrder, evidence: Any) -> int
 
 def _provably_unfilled(intent: ExecutionOrder, trade: Trade, evidence: Any) -> bool:
     """Absence at IB proves nothing unless today's executions were fetched fresh."""
-    created = intent.created_at
-    if created.tzinfo is None:
-        created = created.replace(tzinfo=UTC)
     return (
         evidence.verified
         and intent.order_ref not in evidence.executed
         and not intent.applied
         and trade.status is TradeStatus.WORKING
-        and created.astimezone(ET).date() == evidence.today
+        and _created_on(intent, evidence.today)
         and not _holds_any_leg(trade, evidence.positions)
     )
 
 
-def _stale_entries(ledger: Any, account: str, cutoff: datetime) -> list[ExecutionOrder]:
+def _resolve_tp(ledger: Any, intent: ExecutionOrder, evidence: Any) -> int:
+    """Settle a take-profit IB never acknowledged. Never cancel a take-profit."""
+    trade = ledger.get(intent.trade_id)
+    broker = evidence.views.get(intent.order_ref)
+    status = broker.orderStatus.status if broker is not None else ""
+    if status in ACTIVE_STATUSES:
+        order_id = getattr(broker.order, "orderId", 0)
+        if order_id and not trade.tp_order_id:
+            trade.tp_order_id = str(order_id)
+            ledger.s.commit()
+        _note(
+            ledger,
+            trade,
+            intent,
+            "bound",
+            f"Take-profit order {intent.order_ref} found {status} at IB; bound to the lot",
+        )
+        return 1
+    if broker is None and _tp_never_reached_ib(intent, trade, evidence):
+        intent.status, intent.terminal, intent.management_slot = "NotFound", True, None
+        ledger.s.commit()
+        ledger.record_event(
+            trade,
+            "order_check",
+            f"Take-profit order {intent.order_ref} never reached IB; cleared so a "
+            "new take-profit can be attached",
+        )
+        return 1
+    _note(
+        ledger,
+        trade,
+        intent,
+        "review",
+        f"Take-profit order {intent.order_ref} needs review: IB status "
+        f"{status or 'unknown'}, outcome unverified",
+    )
+    return 0
+
+
+def _tp_never_reached_ib(intent: ExecutionOrder, trade: Trade, evidence: Any) -> bool:
+    """Only clear a take-profit while every leg of the lot it protects is held."""
+    return (
+        evidence.verified
+        and intent.order_ref not in evidence.executed
+        and _created_on(intent, evidence.today)
+        and _holds_all_legs(trade, evidence.positions)
+    )
+
+
+def _created_on(intent: ExecutionOrder, day: Any) -> bool:
+    created = intent.created_at
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=UTC)
+    return created.astimezone(ET).date() == day
+
+
+def _stale_intents(ledger: Any, account: str, cutoff: datetime) -> list[ExecutionOrder]:
+    """Open entry intents, and take-profits IB never acknowledged."""
+    entry = and_(
+        ExecutionOrder.kind == "entry",
+        Trade.status.in_((TradeStatus.WORKING, TradeStatus.OPEN)),
+    )
+    unacknowledged_tp = and_(
+        ExecutionOrder.kind == "tp",
+        ExecutionOrder.order_id.is_(None),
+        Trade.status == TradeStatus.OPEN,
+    )
     return list(
         ledger.s.scalars(
             select(ExecutionOrder)
             .join(Trade, Trade.id == ExecutionOrder.trade_id)
             .where(
-                ExecutionOrder.kind == "entry",
                 ExecutionOrder.terminal.is_(False),
                 ExecutionOrder.account == account,
                 ExecutionOrder.created_at
                 <= cutoff.astimezone(UTC).replace(tzinfo=None),
-                Trade.status.in_((TradeStatus.WORKING, TradeStatus.OPEN)),
+                or_(entry, unacknowledged_tp),
             )
         )
     )
@@ -203,7 +271,18 @@ def _contract_key(symbol: Any, right: Any, strike: Any, expiry: Any) -> tuple:
 
 
 def _holds_any_leg(trade: Trade, positions: list[Any]) -> bool:
-    held = {
+    held = _held_keys(positions)
+    return any(key in held for key in _leg_keys(trade))
+
+
+def _holds_all_legs(trade: Trade, positions: list[Any]) -> bool:
+    held = _held_keys(positions)
+    keys = _leg_keys(trade)
+    return bool(keys) and all(key in held for key in keys)
+
+
+def _held_keys(positions: list[Any]) -> set[tuple]:
+    return {
         _contract_key(
             p.contract.symbol,
             p.contract.right,
@@ -213,16 +292,18 @@ def _holds_any_leg(trade: Trade, positions: list[Any]) -> bool:
         for p in positions or []
         if getattr(p, "position", 0) and getattr(p.contract, "secType", "") == "OPT"
     }
-    return any(
+
+
+def _leg_keys(trade: Trade) -> list[tuple]:
+    return [
         _contract_key(
             trade.symbol,
             getattr(leg.option_type, "value", leg.option_type),
             leg.strike,
             leg.expiration,
         )
-        in held
         for leg in trade.legs
-    )
+    ]
 
 
 def _mark_unfilled(ledger: Any, intent: ExecutionOrder, trade: Trade) -> None:

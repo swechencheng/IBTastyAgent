@@ -1,7 +1,9 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -11,6 +13,7 @@ from tastyagent.api.runtime import Runtime
 from tastyagent.config import TradingMode
 from tastyagent.db.session import init_db
 from tastyagent.portfolio.ledger import Ledger
+from tastyagent.settings import Settings
 
 from .conftest import make_candidate, make_iron_condor
 
@@ -415,4 +418,27 @@ def test_sandbox_reset_endpoint():
     assert pnl["open_count"] == 0
     assert pnl["closed_count"] == 0
     assert pnl["starting_capital"] == 15_000
+
+
+def test_settings_api_rejects_a_walk_interval_beyond_the_cap(tmp_path):
+    # Arrange
+    engine = create_engine(f"sqlite:///{tmp_path / 'api.db'}")
+    init_db(engine)
+    client = TestClient(
+        create_app(sessionmaker(bind=engine), Runtime(mode=TradingMode.SANDBOX))
+    )
+
+    # Act
+    res = client.put("/api/settings", json={"ibkr": {"walk_interval": 900}})
+
+    # Assert
+    assert res.status_code == 400
+    assert "walk_interval" in res.text
+
+
+def test_settings_file_rejects_a_walk_interval_beyond_the_cap(monkeypatch):
+    monkeypatch.setenv("IBKR_WALK_INTERVAL", "900")
+
+    with pytest.raises(ValidationError):
+        Settings()
 

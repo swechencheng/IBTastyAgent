@@ -31,6 +31,11 @@ from ..risk.session import account_modes
 from .. import market_calendar
 from ..execution.fees import FeeRecovery
 from ..scheduler import is_market_open
+from ..settings import (
+    MAX_WALK_INTERVAL_SECONDS,
+    MIN_WALK_INTERVAL_SECONDS,
+    walk_interval_ok,
+)
 from .runtime import Runtime
 from .schemas import (
     ActionResult,
@@ -1290,6 +1295,13 @@ def create_app(
 
         if st is not None:
             if req.ibkr:
+                walk_interval = req.ibkr.get("walk_interval")
+                if walk_interval is not None and not walk_interval_ok(walk_interval):
+                    raise HTTPException(
+                        400,
+                        f"walk_interval must be {MIN_WALK_INTERVAL_SECONDS}-"
+                        f"{MAX_WALK_INTERVAL_SECONDS} whole seconds",
+                    )
                 for k, v in req.ibkr.items():
                     attr = f"ibkr_{k}" if not k.startswith("ibkr_") else k
                     if hasattr(st, attr) and v is not None:

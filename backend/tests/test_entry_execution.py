@@ -285,3 +285,8 @@ async def test_entry_walk_stops_when_the_market_closes(mock_client, monkeypatch)
     assert result.action == "error"
     assert len(orders) == 1
     assert trade.status == TradeStatus.CANCELED
+
+
+def test_placer_rejects_a_walk_interval_beyond_the_cap(mock_client):
+    with pytest.raises(ValueError):
+        IBKRPlacer(mock_client, walk_interval=900)

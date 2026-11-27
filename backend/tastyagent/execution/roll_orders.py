@@ -13,6 +13,7 @@ from ib_async import Contract, Order
 from ib_async import Trade as BrokerTrade
 
 from ..db.models import Trade
+from ..ibkr.client import order_lookup_lock
 from ..ibkr.orders import build_opening_credit_order, build_trade_contract
 from ..ibkr.placer import IBKRPlacer
 from ..models import Action, CandidateTrade
@@ -238,7 +239,8 @@ async def submit_prepared_order(
 
     async def working_orders():
         try:
-            return await asyncio.wait_for(ib.reqAllOpenOrdersAsync(), timeout)
+            async with order_lookup_lock():
+                return await asyncio.wait_for(ib.reqAllOpenOrdersAsync(), timeout)
         except (TimeoutError, ConnectionError, OSError) as err:
             raise RollBlocked("Could not verify outstanding broker orders") from err
 

@@ -14,6 +14,7 @@ import asyncio
 from dataclasses import dataclass, field
 import logging
 from typing import Any, Optional
+import weakref
 
 from ib_async import IB
 import ib_async.wrapper
@@ -58,6 +59,25 @@ class ConnectionStatus:
     paper_connected: bool
     status: str  # "connected" | "warning" | "disconnected"
     detail: str
+
+
+_order_lookup_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def order_lookup_lock() -> asyncio.Lock:
+    """One lock per event loop for IB's name-keyed order requests.
+
+    ib_async registers reqOpenOrders/reqAllOpenOrders under one fixed key and
+    reqCompletedOrders under another; an overlapping request replaces the first
+    request's future, which then never resolves. Every caller takes this lock.
+    """
+    loop = asyncio.get_running_loop()
+    lock = _order_lookup_locks.get(loop)
+    if lock is None:
+        lock = _order_lookup_locks[loop] = asyncio.Lock()
+    return lock
 
 
 class IBKRClient:
